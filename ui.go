@@ -38,6 +38,8 @@ type statusView struct {
 	ReservePercent int
 	StopPercent    int
 	ChatBlocked    bool
+	GuardChat      bool
+	GuardHref      string
 	KeepPaused     bool
 	HasReset       bool
 	UsedKnown      bool
@@ -112,7 +114,7 @@ func buildStatusView(st statusPage) statusView {
 		NextPing:       formatTime(st.NextPingAt),
 		NextPingAgo:    formatUntil(st.Now, st.NextPingAt),
 		PingError:      st.LastPingError,
-		Now:            st.Now.UTC().Format("15:04:05 UTC"),
+		Now:            st.Now.In(beijingZone).Format("15:04:05"),
 		BudgetWindow:   fmt.Sprintf("%d 小时", (st.Budget.WindowMin+59)/60),
 		BudgetChat:     formatUnits(st.Budget.ChatUnits),
 		BudgetKeep:     formatUnits(st.Budget.KeepaliveUnits),
@@ -123,6 +125,8 @@ func buildStatusView(st statusPage) statusView {
 		ReservePercent: st.Budget.ReservePercent,
 		StopPercent:    stopPercentFromReserve(st.Budget.ReservePercent),
 		ChatBlocked:    st.Budget.ChatBlocked,
+		GuardChat:      st.Budget.GuardChat,
+		GuardHref:      guardHref(!st.Budget.GuardChat),
 		KeepPaused:     st.Budget.KeepalivePaused,
 		HasReset:       !st.Budget.ResetAt.IsZero(),
 		UsedKnown:      st.Budget.UsedKnown,
@@ -145,14 +149,17 @@ func buildStatusView(st statusPage) statusView {
 		} else {
 			view.BudgetNote = fmt.Sprintf("CPA 对话已在 %d%% 停住，等到用量掉回停线或读到刷新时间。最后 %d%% 留给保活。/compact 仍放行。", st.Budget.BlockAtPercent, st.Budget.ReservePercent)
 		}
+	case !st.Budget.GuardChat:
+		view.BudgetNote = "对话拦截已关，到停线也不会本地 429。5 小时额度仍由上游计。"
+		view.BudgetBlock = "关闭"
 	case st.Budget.KeepalivePaused:
 		view.BudgetNote = st.Budget.PauseReason
 	case st.Budget.UsedKnown:
-		view.BudgetNote = fmt.Sprintf("上游 5 小时已用 %.0f%%。CPA 对话会在 %d%% 停住，把最后 %d%% 留给保活。", st.Budget.UsedPercent, st.Budget.BlockAtPercent, st.Budget.ReservePercent)
+		view.BudgetNote = fmt.Sprintf("上游 5 小时已用 %.0f%%。用量真到 %d%% 才拦对话，不按下一发估。最后 %d%% 留给保活。", st.Budget.UsedPercent, st.Budget.BlockAtPercent, st.Budget.ReservePercent)
 	case st.Budget.Budget > 0:
 		view.BudgetNote = fmt.Sprintf("还没读到上游 5h 用量头，先按加权预算拦对话，预留 %d%% 给保活。", st.Budget.ReservePercent)
 	default:
-		view.BudgetNote = fmt.Sprintf("等下一轮 CPA 请求带上 5h 用量头后，会在 %d%% 拦住对话，把最后 %d%% 留给保活。", st.Budget.BlockAtPercent, st.Budget.ReservePercent)
+		view.BudgetNote = fmt.Sprintf("等下一轮 CPA 请求带上 5h 用量头后，用量真到 %d%% 才拦对话，把最后 %d%% 留给保活。", st.Budget.BlockAtPercent, st.Budget.ReservePercent)
 	}
 	interval := time.Duration(st.IntervalMin) * time.Minute
 	view.Sessions = make([]sessionRow, 0, len(st.Sessions))
@@ -181,7 +188,7 @@ func buildStatusView(st statusPage) statusView {
 		if item.Enabled {
 			if item.PingExpensive {
 				row.NextPing = "已暂停"
-				row.NextPingAgo = "上次未命中，避免反复重写"
+				row.NextPingAgo = "连续未命中，避免反复重写"
 			} else {
 				row.NextPing = formatTime(next)
 				row.NextPingAgo = formatUntil(st.Now, next)
@@ -217,11 +224,11 @@ func buildStatusView(st statusPage) statusView {
 	case len(st.Sessions) == 0:
 		view.State = "empty"
 		view.StateLabel = "等待对话"
-		view.StateHint = "还没有记下 Claude 对话。用 Claude Code 走 CPA 正常聊一轮后，这里会出现会话；新对话默认勾选保活。"
+		view.StateHint = "还没有记下 Claude 对话。用 Claude Code 走 CPA 正常聊一轮后，这里会出现会话；新对话默认不保活。"
 	case st.EnabledCount == 0:
 		view.State = "empty"
-		view.StateLabel = "已全部暂停"
-		view.StateHint = "会话还在，但没有勾选保活。点左侧方块即可重新打开；取消勾选的对话超过空闲时间会被丢掉。"
+		view.StateLabel = "未开保活"
+		view.StateHint = "会话已经记下，但默认不保活。点左侧方块才会定时续缓存。满员时优先顶掉没开保活的；没开的超过空闲时间也会被丢掉。"
 	case st.LastPingAt.IsZero():
 		view.State = "armed"
 		view.StateLabel = "已记录，等待保活"
@@ -240,6 +247,13 @@ func toggleHref(id string, enable bool) string {
 		on = "1"
 	}
 	return "?toggle=" + id + "&on=" + on
+}
+
+func guardHref(enable bool) string {
+	if enable {
+		return "?guard=1"
+	}
+	return "?guard=0"
 }
 
 func buildQuotaRow(now time.Time, sample quotaSample) quotaRow {
@@ -351,11 +365,13 @@ func formatBytes(n int) string {
 	return fmt.Sprintf("%.2f MB", float64(n)/(1024*1024))
 }
 
+var beijingZone = time.FixedZone("CST", 8*3600)
+
 func formatTime(t time.Time) string {
 	if t.IsZero() {
 		return "—"
 	}
-	return t.UTC().Format("2006-01-02 15:04:05 UTC")
+	return t.In(beijingZone).Format("2006-01-02 15:04:05") + " 北京时间"
 }
 
 func formatAgo(now, then time.Time) string {
@@ -514,6 +530,12 @@ h3 { margin: 0 0 4px; font-size: 15px; font-weight: 650; letter-spacing: -.01em;
   padding: 6px 10px; font: inherit; font-size: 12px; cursor: pointer;
 }
 .stop-form .hint { color: var(--muted); font-size: 12px; }
+.stop-form a.guard {
+  text-decoration: none; border-radius: 8px; padding: 6px 10px; font-size: 12px; font-weight: 650;
+  border: 1px solid var(--line);
+}
+.stop-form a.guard.on { color: var(--ok); background: var(--ok-bg); }
+.stop-form a.guard.off { color: var(--muted); background: var(--empty-bg); }
 .rename { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 4px; }
 .rename input {
   flex: 1; min-width: 10rem; max-width: 22rem;
@@ -611,7 +633,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
     <input name="stop" type="number" min="60" max="99" step="1" value="{{.StopPercent}}" aria-label="对话停在百分之几">
     <span>%</span>
     <button type="submit">保存</button>
-    <span class="hint">默认 95。98 太薄，一发长对话容易打穿 100%。改完会记住，重启 CPA 也还在。</span>
+    <a class="guard {{if .GuardChat}}on{{else}}off{{end}}" data-action href="{{.GuardHref}}">{{if .GuardChat}}正在拦对话{{else}}未拦对话{{end}}</a>
+    <span class="hint">默认 95，用量真到这条线才拦，不按下一发估。点右侧开关可关掉拦截。改完会记住，重启 CPA 也还在。</span>
   </form>
   {{if .ChatBlocked}}
   <div class="warn">CPA 对话已停在停线。等到 5 小时额度刷新{{if .HasReset}}（{{.ResetAt}}，{{.ResetIn}}）{{end}}或用量掉回停线。/compact 仍可走。保活不受停线影响。</div>
@@ -638,7 +661,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
           <span>下次保活 {{.NextPing}} {{.NextPingAgo}}</span>
           <span>上次保活 {{.LastPing}} {{.LastPingAgo}}{{if ne .PingCache "—"}} · {{.PingCache}}{{end}}</span>
         </div>
-        {{if .PingPaused}}<div class="row-err">上次保活未命中缓存，已暂停后续心跳，避免把整段前缀反复按 1h 写入计费。新对话后会重新开。</div>{{end}}
+        {{if .PingPaused}}<div class="row-err">连续两次保活未命中，已暂停后续心跳，避免把冷前缀反复按 1h 写入。新对话后会重新开。</div>{{end}}
         {{if .PingError}}<div class="row-err">{{.PingError}}</div>{{end}}
       </div>
       <div class="actions">
@@ -648,7 +671,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
     </article>
     {{end}}
   </div>
-  <p class="hint">点左侧方块勾选或取消定时保活。「立刻保活」只打这一路，不等倒计时。会话名称可以自己改，留空再保存会回到首条消息。CPA 对话会在上面填的百分比停住，留下一截给保活，也避免最后一发打穿 100%。Claude Code 的 Task/Agent 子代理会单独成一路请求，插件认出来后不保活。</p>
+  <p class="hint">新对话默认不保活，点左侧方块才定时续。满员（比如 8 路）时优先顶掉没开保活的。「立刻保活」只打这一路，不等倒计时。会话名称可以自己改，留空再保存会回到首条消息。CPA 对话会在上面填的百分比停住，留下一截给保活，也避免最后一发打穿 100%。Claude Code 的 Task/Agent 子代理会单独成一路请求，插件认出来后不保活。</p>
   {{if .SubagentNote}}
   <p class="hint">{{.SubagentNote}}</p>
   {{end}}

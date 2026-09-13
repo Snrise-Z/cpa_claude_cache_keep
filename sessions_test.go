@@ -47,10 +47,17 @@ func TestUpsertPreservesEnabled(t *testing.T) {
 	body := claudeBody("保活开关", "sys")
 	upsertSession("claude-opus-5", "claude", "claude", nil, body)
 	items := listSessions()
-	if len(items) != 1 || !items[0].Enabled {
-		t.Fatalf("new session should start enabled: %+v", items)
+	if len(items) != 1 || items[0].Enabled {
+		t.Fatalf("new session should start unchecked: %+v", items)
 	}
 	id := items[0].ID
+	if !setSessionEnabled(id, true) {
+		t.Fatal("toggle failed")
+	}
+	upsertSession("claude-opus-5", "claude", "claude", nil, body)
+	if !listSessions()[0].Enabled {
+		t.Fatal("checked session should stay checked after a new turn")
+	}
 	if !setSessionEnabled(id, false) {
 		t.Fatal("toggle failed")
 	}
@@ -82,8 +89,8 @@ func TestMaxSessionsEvictsDisabledFirst(t *testing.T) {
 		t.Fatalf("want 2 sessions, got %d", len(listSessions()))
 	}
 	for _, item := range listSessions() {
-		if item.Label == "对话甲" && !setSessionEnabled(item.ID, false) {
-			t.Fatal("disable failed")
+		if item.Label == "对话乙" && !setSessionEnabled(item.ID, true) {
+			t.Fatal("enable keepalive failed")
 		}
 	}
 	upsertSession("claude-opus-5", "claude", "claude", nil, claudeBody("对话丙", "sys"))
@@ -92,10 +99,45 @@ func TestMaxSessionsEvictsDisabledFirst(t *testing.T) {
 		got[item.Label] = true
 	}
 	if got["对话甲"] {
-		t.Fatalf("disabled oldest session should be evicted first: %+v", got)
+		t.Fatalf("unchecked session should be evicted before a keepalive one: %+v", got)
 	}
 	if !got["对话乙"] || !got["对话丙"] {
 		t.Fatalf("expected 乙 and 丙, got %+v", got)
+	}
+	for _, item := range listSessions() {
+		switch item.Label {
+		case "对话乙":
+			if !item.Enabled {
+				t.Fatal("keepalive session must stay checked")
+			}
+		case "对话丙":
+			if item.Enabled {
+				t.Fatal("replacement session should start unchecked")
+			}
+		}
+	}
+}
+
+func TestMaxSessionsReplacesUncheckedWhenNoneEnabled(t *testing.T) {
+	resetSessionsForTest()
+	t.Cleanup(resetSessionsForTest)
+	mu.Lock()
+	cfg.MaxSessions = 2
+	mu.Unlock()
+
+	upsertSession("claude-opus-5", "claude", "claude", nil, claudeBody("闲聊甲", "sys"))
+	time.Sleep(2 * time.Millisecond)
+	upsertSession("claude-opus-5", "claude", "claude", nil, claudeBody("闲聊乙", "sys"))
+	upsertSession("claude-opus-5", "claude", "claude", nil, claudeBody("闲聊丙", "sys"))
+	got := map[string]bool{}
+	for _, item := range listSessions() {
+		if item.Enabled {
+			t.Fatalf("new sessions must stay unchecked: %+v", item)
+		}
+		got[item.Label] = true
+	}
+	if got["闲聊甲"] || !got["闲聊乙"] || !got["闲聊丙"] {
+		t.Fatalf("with 0 keepalive, oldest unchecked should be replaced: %+v", got)
 	}
 }
 
@@ -116,7 +158,9 @@ func TestIdleEvictSkipsEnabledSessions(t *testing.T) {
 			keepID = item.ID
 		}
 	}
-	setSessionEnabled(dropID, false)
+	if !setSessionEnabled(keepID, true) {
+		t.Fatal("enable keepalive failed")
+	}
 	mu.Lock()
 	sessions[keepID].LastSeen = time.Now().Add(-2 * time.Hour)
 	sessions[dropID].LastSeen = time.Now().Add(-2 * time.Hour)
@@ -201,9 +245,12 @@ func TestHandleStatusToggleRedirects(t *testing.T) {
 	t.Cleanup(resetSessionsForTest)
 	upsertSession("claude-opus-5", "claude", "claude", nil, claudeBody("开关跳转", "sys"))
 	id := listSessions()[0].ID
+	if listSessions()[0].Enabled {
+		t.Fatal("new session should start unchecked")
+	}
 	raw, err := json.Marshal(pluginapi.ManagementRequest{
 		Path:  "/v0/resource/plugins/claude-cache-keepalive/status",
-		Query: url.Values{"toggle": {id}, "on": {"0"}},
+		Query: url.Values{"toggle": {id}, "on": {"1"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -226,8 +273,8 @@ func TestHandleStatusToggleRedirects(t *testing.T) {
 	if loc := out.Headers.Get("Location"); loc != "/v0/resource/plugins/claude-cache-keepalive/status" {
 		t.Fatalf("location=%q", loc)
 	}
-	if listSessions()[0].Enabled {
-		t.Fatal("session should be unchecked after toggle")
+	if !listSessions()[0].Enabled {
+		t.Fatal("session should be checked after toggle")
 	}
 }
 
@@ -239,6 +286,7 @@ func TestHandleStatusPingRedirects(t *testing.T) {
 	setSessionEnabled(id, false)
 	mu.Lock()
 	sessions[id].PingExpensive = true
+		sessions[id].PingMissStreak = 2
 	mu.Unlock()
 
 	var gotID string
@@ -281,8 +329,12 @@ func TestHandleStatusPingRedirects(t *testing.T) {
 	if got.LastPingAt.IsZero() {
 		t.Fatal("last ping not recorded")
 	}
-	if got.PingExpensive {
+	if got.PingExpensive || got.PingMissStreak != 0 {
 		t.Fatal("manual ping should clear expensive pause")
+	}
+	next := sessionNextPingAt(got.LastSeen, got.LastPingAt, time.Now(), 50*time.Minute)
+	if next.Sub(got.LastPingAt) < 49*time.Minute || next.Sub(got.LastPingAt) > 51*time.Minute {
+		t.Fatalf("manual ping should push next auto ping ~50m out, next=%s ping=%s", next, got.LastPingAt)
 	}
 	if got.Enabled {
 		t.Fatal("manual ping should not re-enable the session")
@@ -310,7 +362,6 @@ func TestPingOnceSkipsWhenNothingEnabled(t *testing.T) {
 	resetSessionsForTest()
 	t.Cleanup(resetSessionsForTest)
 	upsertSession("claude-opus-5", "claude", "claude", nil, claudeBody("先记下来", "sys"))
-	setSessionEnabled(listSessions()[0].ID, false)
 	sent, n, err := pingOnce()
 	if sent || n != 0 || err != nil {
 		t.Fatalf("unchecked sessions must not ping: sent=%v n=%d err=%v", sent, n, err)
@@ -321,6 +372,9 @@ func TestPingOnceSkipsFreshSession(t *testing.T) {
 	resetSessionsForTest()
 	t.Cleanup(resetSessionsForTest)
 	upsertSession("claude-opus-5", "claude", "claude", nil, claudeBody("刚聊完", "sys"))
+	if !setSessionEnabled(listSessions()[0].ID, true) {
+		t.Fatal("enable failed")
+	}
 	sent, n, err := pingOnce()
 	if sent || n != 0 || err != nil {
 		t.Fatalf("fresh session must wait until last request + interval: sent=%v n=%d err=%v", sent, n, err)
@@ -391,6 +445,9 @@ func TestDueSnapshotsUsesLastRequestNotLastPing(t *testing.T) {
 	t.Cleanup(resetSessionsForTest)
 	upsertSession("claude-opus-5", "claude", "claude", nil, claudeBody("到期检查", "sys"))
 	id := listSessions()[0].ID
+	if !setSessionEnabled(id, true) {
+		t.Fatal("enable failed")
+	}
 	now := time.Now()
 	mu.Lock()
 	sessions[id].LastSeen = now.Add(-70 * time.Minute)

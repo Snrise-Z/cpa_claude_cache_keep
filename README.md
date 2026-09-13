@@ -6,7 +6,7 @@ A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) plugin that rememb
 
 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 插件：记住走 CPA 的 Claude 对话，每隔 50 分钟把已勾选会话原样重发，并把 `max_tokens` 卡成 1，用来刷新 Anthropic prompt cache 的 1 小时 TTL。
 
-Current version **0.8.7**. / 当前版本 **0.8.7**。
+Current version **0.8.11**. / 当前版本 **0.8.11**。
 
 ---
 
@@ -21,12 +21,12 @@ A successful keepalive is a real Messages completion that **reads** the cached p
 ### What it does
 
 - Remembers up to 8 chats. With `X-Claude-Code-Session-Id`, `/compact` stays the same row. Without that header it keys on model + first user message + system; compact may show up as a new row and is not merged into another chat
-- New chats default to keepalive on. From the last real chat request, each checked session is POSTed back to local `/v1/messages` every 50 minutes (`max_tokens=1`, `stream=false`). Thinking / effort are left as-is so the cache key does not change
+- New chats default to keepalive off. Check a session on the status page to keep it. From the last real chat request, each checked session is POSTed back to local `/v1/messages` every 50 minutes (`max_tokens=1`, `stream=false`). Thinking / effort are left as-is so the cache key does not change
 - Status page: toggle, rename, forget, **Ping now** (replays that session immediately, even if the timer is still running), and the 5-hour stop percent
 - Claude Code Task / Agent subagents are not kept alive (`X-Claude-Code-Agent-Id`, `cc_is_subagent=true` in system)
-- After a 5-hour stop, **chat stays blocked** until utilization drops or the window `Reset` time passes. `/compact` and compact continuations still go through. If chat and keepalive are both paused and no Reset time is known, one probe chat is allowed so the window cannot deadlock
+- After a 5-hour stop, **chat stays blocked** until utilization **actually** reaches the stop line (default 95%). A cache-miss rewrite is not used to predict the next turn. `/compact` still goes through. Status page can turn this local block off. If chat and keepalive are both paused and no Reset time is known, one probe chat is allowed so the window cannot deadlock
 
-Unchecked sessions still update their snapshot on new messages. Checked sessions are not evicted for idle. Unchecked ones older than `idle_evict_minutes` (default 180) are dropped; over the cap, unchecked / least-recent chats go first.
+Unchecked sessions still update their snapshot on new messages. Checked sessions are not evicted for idle. Unchecked ones older than `idle_evict_minutes` (default 180) are dropped; over the cap, unchecked chats are replaced first, then the least-recent.
 
 Restarting CPA clears in-memory sessions and the 5-hour usage window. The stop percent from the status page is written to `claude-cache-keepalive.settings.json` and survives restart.
 
@@ -110,10 +110,9 @@ Status page:
 
 The plugin never probes Anthropic for quota. It only reads response headers that already came back: `Anthropic-Ratelimit-Unified-5h-Utilization`, `Status`, and `Reset`.
 
-- Default: CPA chat is locally 429’d at **95%** and **stays blocked** until util drops (including a keepalive header) or `Reset` is reached, so one long turn cannot punch through 100%
+- Default: CPA chat is locally 429’d only when utilization **is already** at **95%**, and stays blocked until util drops or `Reset`. Status page has an on/off for this guard
 - Status page can change “stop chat at x%” (60–99). That value is stored in `claude-cache-keepalive.settings.json`. When a Reset time is known, it is shown on the 5-hour card
 - After Reset, local utilization is cleared. The top card may show `—` until the next Anthropic response brings a new header. The quota table still lists the last samples
-- If units-per-percent has been calibrated, a turn predicted to land past the stop line is also blocked
 - Keepalive keeps using the slice after the stop line (1 token + cache read)
 - At 100% / `rejected`, keepalive pauses too. If both are paused and Reset is unknown, one chat probe is allowed
 - `/compact` (Claude Code summary prompt, compact continuation, `context_management` compact edits, or `Anthropic-Beta` containing `compact-2026`) is not quota-blocked. Talking about `/compact` is still a normal chat
@@ -122,7 +121,7 @@ The **Quota log** on the status page keeps 5 rows: cache read/write, 5h/7d heade
 
 `five_hour_budget` is only a fallback when utilization headers are missing.
 
-Cache misses are usually a **prefix change**, not a missing 1-token output: `currentDate`, tool schemas, skills/MCP reminders, effort/thinking, or mixed 5m/1h breakpoints will rewrite the whole prefix.
+Cache misses are usually a **prefix change**, not a missing 1-token output: `currentDate`, tool schemas, skills/MCP reminders, effort/thinking, or mixed 5m/1h breakpoints will rewrite the whole prefix. A single expensive keepalive miss keeps pinging so that paid 1h rewrite can refresh; two consecutive expensive misses pause that session.
 
 ### Config
 
@@ -161,12 +160,12 @@ If upstream TTL is still 5 minutes, a 50-minute ping is too late. Set `promptCac
 ### 做什么
 
 - 最多记住 8 路。有 `X-Claude-Code-Session-Id` 时按这个 ID 认对话，`/compact` 后仍是同一路。没有这个头时只用「模型 + 第一条用户消息 + system」，compact 可能显示成新的一行，不会猜着并进别的对话
-- 新对话默认勾选保活；从最后一次对话请求起算，每 50 分钟把上次请求 POST 回本机 `/v1/messages` 一次（`max_tokens=1`，`stream=false`）。thinking / effort 原样带着，避免把缓存键改掉
+- 新对话默认不保活，状态页勾上才会续；从最后一次对话请求起算，每 50 分钟把上次请求 POST 回本机 `/v1/messages` 一次（`max_tokens=1`，`stream=false`）。thinking / effort 原样带着，避免把缓存键改掉
 - 状态页可勾选、取消、改名、忘记某一路，也可点「立刻保活」马上重放这一路；还可改 5 小时额度的停线
 - Claude Code 的 Task / Agent 子代理不进保活名单（带 `X-Claude-Code-Agent-Id`，system 里有 `cc_is_subagent=true`）
-- 5 小时用量碰到停线后会一直拦对话，等到用量掉回停线或窗口 `Reset` 到期。`/compact` 和压缩续写仍放行。对话和保活都停、又还没读到刷新时间时，会放行一发探测，避免卡死
+- 5 小时用量**真到**停线（默认 95%）后才拦对话，不用 cache miss 去估下一发。`/compact` 仍放行。状态页可关掉这道本地拦截。对话和保活都停、又还没读到刷新时间时，会放行一发探测，避免卡死
 
-取消勾选后仍会跟着新消息更新快照。已勾选的不会因为空闲被踢掉。未勾选的超过 `idle_evict_minutes`（默认 180）会被丢掉；超过上限时优先丢掉未勾选、最久没说话的对话。
+取消勾选后仍会跟着新消息更新快照。已勾选的不会因为空闲被踢掉。未勾选的超过 `idle_evict_minutes`（默认 180）会被丢掉；超过上限时优先顶掉未勾选的，再才动最久没说话的。
 
 重启 CPA 会清空内存里的会话名单和 5 小时用量窗口。状态页改过的停线会写到 `claude-cache-keepalive.settings.json`，重启后仍在。
 
@@ -250,10 +249,9 @@ plugins:
 
 插件不额外打上游查额度，只读已经回来的响应头 `Anthropic-Ratelimit-Unified-5h-Utilization` / `Status` / `Reset`。
 
-- CPA 对话默认用到 **95%** 就在本地拦成 429，并一直拦到用量掉回停线（包括保活带回来的头）或 `Reset` 到期，避免一发长对话打穿 100%
-- 状态页可改「对话停在 x%」（60–99），写到工作目录下的 `claude-cache-keepalive.settings.json`；有刷新时间时会显示在 5 小时卡片上
+- CPA 对话默认只在用量**已经到 95%** 时本地 429，并拦到用量掉回停线或 `Reset` 到期。cache miss 不拿来估下一发
+- 状态页可改「对话停在 x%」（60–99），也可关掉拦截；都写到 `claude-cache-keepalive.settings.json`
 - `Reset` 到期后会清掉本地用量。顶栏可能显示 `—`，等下一发 Anthropic 响应带新头；额度表仍保留最近几条记录
-- 标定过「多少用量对应 1%」后，若这一发预估会越过停线，也会先拦
 - 保活继续用停线后面那一截（1 token + cache read）
 - 用到 100% / `rejected` 时保活也停。两边都停且没有 `Reset` 时，放行一发对话探测新额度头
 - `/compact`（Claude Code 摘要提示、压缩续写、`context_management` 的 compact edit、或 `Anthropic-Beta` 里带 `compact-2026`）不受停线限制。只是聊「/compact 怎么用」仍按普通对话拦
@@ -262,7 +260,7 @@ plugins:
 
 `five_hour_budget` 只在没有用量头时当后备。
 
-缓存不命中多半是 **前缀变了**，不是少输出了 1 个 token：`currentDate`、工具描述、skills/MCP 提醒、effort/thinking、5 分钟和 1 小时断点混用，都会整段重写。
+缓存不命中多半是 **前缀变了**，不是少输出了 1 个 token：`currentDate`、工具描述、skills/MCP 提醒、effort/thinking、5 分钟和 1 小时断点混用，都会整段重写。保活单次大写仍继续心跳，好续上刚付过费的 1h 前缀；连续两次大写才暂停该路。
 
 ### 配置
 

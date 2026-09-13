@@ -14,7 +14,8 @@ const (
 )
 
 type persistedSettings struct {
-	StopPercent int `json:"stop_percent"`
+	StopPercent int   `json:"stop_percent"`
+	GuardChat   *bool `json:"guard_chat,omitempty"`
 }
 
 var (
@@ -53,31 +54,62 @@ func setStopPercent(stop int) int {
 	stop = clampStopPercent(stop)
 	mu.Lock()
 	cfg.ReservePercent = 100 - stop
-	path := resolvedSettingsPath()
 	mu.Unlock()
-	if path != "" {
-		raw, err := json.MarshalIndent(persistedSettings{StopPercent: stop}, "", "  ")
-		if err == nil {
-			_ = os.WriteFile(path, raw, 0o644)
-		}
-	}
+	writePersistedSettings()
 	return stop
 }
 
-func loadPersistedStopPercent() (int, bool) {
+func setGuardChat(on bool) {
+	mu.Lock()
+	cfg.GuardChat = &on
+	mu.Unlock()
+	writePersistedSettings()
+}
+
+func writePersistedSettings() {
+	mu.Lock()
+	stop := stopPercentFromReserve(cfg.ReservePercent)
+	guard := cfg.guardChat()
+	path := resolvedSettingsPath()
+	mu.Unlock()
+	if path == "" {
+		return
+	}
+	g := guard
+	raw, err := json.MarshalIndent(persistedSettings{StopPercent: stop, GuardChat: &g}, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(path, raw, 0o644)
+	}
+}
+
+func loadPersistedSettings() (persistedSettings, bool) {
 	path := resolvedSettingsPath()
 	if path == "" {
-		return 0, false
+		return persistedSettings{}, false
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil || len(raw) == 0 {
-		return 0, false
+		return persistedSettings{}, false
 	}
 	var saved persistedSettings
-	if err := json.Unmarshal(raw, &saved); err != nil || saved.StopPercent == 0 {
-		return 0, false
+	if err := json.Unmarshal(raw, &saved); err != nil {
+		return persistedSettings{}, false
 	}
-	return clampStopPercent(saved.StopPercent), true
+	if saved.StopPercent != 0 {
+		saved.StopPercent = clampStopPercent(saved.StopPercent)
+	}
+	return saved, saved.StopPercent != 0 || saved.GuardChat != nil
+}
+
+func parseGuardQuery(raw string) (bool, bool) {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "1", "true", "on":
+		return true, true
+	case "0", "false", "off":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func parseStopQuery(raw string) (int, bool) {

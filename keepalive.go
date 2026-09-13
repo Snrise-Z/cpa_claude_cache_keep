@@ -347,18 +347,26 @@ func truncateRunes(s string, n int) string {
 	return string(runes[:n]) + "…"
 }
 
-// sessionNextPingAt aligns keepalive slots to the last real upstream request
-// (LastSeen), not to the last keepalive ping and not to plugin start.
+func sessionAnchor(lastSeen, lastPing time.Time) time.Time {
+	if lastPing.After(lastSeen) {
+		return lastPing
+	}
+	return lastSeen
+}
+
+// sessionNextPingAt is 50 minutes after the later of the last real chat
+// (LastSeen) and the last successful keepalive (including 立刻保活).
 func sessionNextPingAt(lastSeen, lastPing, now time.Time, interval time.Duration) time.Time {
-	if lastSeen.IsZero() || interval <= 0 {
+	anchor := sessionAnchor(lastSeen, lastPing)
+	if anchor.IsZero() || interval <= 0 {
 		return time.Time{}
 	}
-	elapsed := now.Sub(lastSeen)
+	elapsed := now.Sub(anchor)
 	if elapsed < interval {
-		return lastSeen.Add(interval)
+		return anchor.Add(interval)
 	}
 	n := elapsed / interval
-	slotStart := lastSeen.Add(n * interval)
+	slotStart := anchor.Add(n * interval)
 	if lastPing.Before(slotStart) {
 		return slotStart
 	}
@@ -366,13 +374,14 @@ func sessionNextPingAt(lastSeen, lastPing, now time.Time, interval time.Duration
 }
 
 func sessionDue(lastSeen, lastPing, now time.Time, interval time.Duration) bool {
-	if lastSeen.IsZero() || interval <= 0 {
+	anchor := sessionAnchor(lastSeen, lastPing)
+	if anchor.IsZero() || interval <= 0 {
 		return false
 	}
-	if now.Sub(lastSeen) < interval {
+	if now.Sub(anchor) < interval {
 		return false
 	}
-	n := now.Sub(lastSeen) / interval
-	slotStart := lastSeen.Add(n * interval)
+	n := now.Sub(anchor) / interval
+	slotStart := anchor.Add(n * interval)
 	return lastPing.Before(slotStart)
 }

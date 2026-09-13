@@ -83,18 +83,25 @@ func TestSessionNextPingAtAnchoredToLastRequest(t *testing.T) {
 		t.Fatalf("due first slot should stay at lastSeen+interval, got %s", got)
 	}
 
-	pinged := lastSeen.Add(51 * time.Minute)
-	now = lastSeen.Add(52 * time.Minute)
+	pinged := lastSeen.Add(20 * time.Minute)
+	now = lastSeen.Add(21 * time.Minute)
 	got = sessionNextPingAt(lastSeen, pinged, now, interval)
-	if !got.Equal(lastSeen.Add(100 * time.Minute)) {
-		t.Fatalf("after ping, next slot should stay aligned to lastSeen, got %s", got)
+	if !got.Equal(pinged.Add(interval)) {
+		t.Fatalf("manual ping should refresh next auto slot, got %s want %s", got, pinged.Add(interval))
 	}
 
 	now = lastSeen.Add(85 * time.Minute)
 	laterPing := lastSeen.Add(80 * time.Minute)
 	got = sessionNextPingAt(lastSeen, laterPing, now, interval)
-	if !got.Equal(lastSeen.Add(100 * time.Minute)) {
-		t.Fatalf("late ping must not shift the grid off lastSeen, got %s", got)
+	if !got.Equal(laterPing.Add(interval)) {
+		t.Fatalf("after a ping, next should be ping+interval, got %s", got)
+	}
+}
+
+func TestFormatTimeBeijing(t *testing.T) {
+	got := formatTime(time.Date(2026, 9, 12, 18, 10, 0, 0, time.UTC))
+	if got != "2026-09-13 02:10:00 北京时间" {
+		t.Fatalf("got %q", got)
 	}
 }
 
@@ -124,6 +131,20 @@ func TestRenderStatusHTMLEmptyAndArmed(t *testing.T) {
 	t.Cleanup(resetSessionsForTest)
 
 	html := renderStatusHTML()
+	if !strings.Contains(html, "未开保活") {
+		t.Fatalf("new sessions should start unchecked: %s", html)
+	}
+	items := listSessions()
+	if len(items) != 2 {
+		t.Fatalf("sessions=%d", len(items))
+	}
+	for _, item := range items {
+		if item.Enabled {
+			t.Fatalf("new session should start unchecked: %+v", item)
+		}
+		setSessionEnabled(item.ID, true)
+	}
+	html = renderStatusHTML()
 	if !strings.Contains(html, "已记录，等待保活") {
 		t.Fatalf("armed page missing status: %s", html)
 	}
@@ -152,14 +173,10 @@ func TestRenderStatusHTMLEmptyAndArmed(t *testing.T) {
 		t.Fatal("missing view root for silent updates")
 	}
 
-	items := listSessions()
-	if len(items) != 2 {
-		t.Fatalf("sessions=%d", len(items))
-	}
 	setSessionEnabled(items[0].ID, false)
 	setSessionEnabled(items[1].ID, false)
 	paused := renderStatusHTML()
-	if !strings.Contains(paused, "已全部暂停") {
+	if !strings.Contains(paused, "未开保活") {
 		t.Fatalf("paused page missing status: %s", paused)
 	}
 }

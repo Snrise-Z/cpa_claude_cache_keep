@@ -131,6 +131,25 @@ func cacheTokensFromDetail(d pluginapi.UsageDetail) (read, write int64) {
 	return read, d.CacheCreationTokens
 }
 
+func expensiveCacheWrite(read, write int64) bool {
+	return write > 20000 && write > read
+}
+
+// One miss already paid for a 1h rewrite; keep pinging so that write can
+// refresh. Pause only after two expensive keepalives in a row.
+func applyKeepaliveCacheResult(item *session, read, write int64) {
+	item.LastPingCacheRead, item.LastPingCacheWrite = read, write
+	if expensiveCacheWrite(read, write) {
+		item.PingMissStreak++
+		if item.PingMissStreak >= 2 {
+			item.PingExpensive = true
+		}
+		return
+	}
+	item.PingMissStreak = 0
+	item.PingExpensive = false
+}
+
 func cacheVerdict(read, write int64) string {
 	if read <= 0 && write <= 0 {
 		return "—"
@@ -283,7 +302,7 @@ func listQuotaSamples() []quotaSample {
 }
 
 func estimatePingUnits(item session) int64 {
-	if item.LastPingUnits > 0 {
+	if item.LastPingUnits > 0 && !expensiveCacheWrite(item.LastPingCacheRead, item.LastPingCacheWrite) {
 		return item.LastPingUnits
 	}
 	if item.LastChatUnits > 0 {
@@ -372,10 +391,8 @@ func recordUsage(rec pluginapi.UsageRecord) {
 		if currentPingID != "" {
 			if item := sessions[currentPingID]; item != nil {
 				item.LastPingUnits = units
-				item.LastPingCacheRead, item.LastPingCacheWrite = cacheTokensFromDetail(rec.Detail)
-				if item.LastPingCacheWrite > 20000 && item.LastPingCacheWrite > item.LastPingCacheRead {
-					item.PingExpensive = true
-				}
+				read, write := cacheTokensFromDetail(rec.Detail)
+				applyKeepaliveCacheResult(item, read, write)
 			}
 		}
 		return
@@ -389,21 +406,6 @@ func recordUsage(rec pluginapi.UsageRecord) {
 			item.LastChatUnits = units
 		}
 	}
-}
-
-func estimateBodyUnits(model string, body []byte) int64 {
-	tokens := int64(len(body) / 4)
-	if tokens < 1 {
-		tokens = 1
-	}
-	return weightedUnits(model, pluginapi.UsageDetail{InputTokens: tokens, OutputTokens: 1})
-}
-
-func estimateNextChatUnitsLocked(model string, headers http.Header, body []byte) int64 {
-	if item := sessions[sessionKey(model, headers, body)]; item != nil && item.LastChatUnits > 0 {
-		return item.LastChatUnits
-	}
-	return estimateBodyUnits(model, body)
 }
 
 func expireFiveHourLocked(now time.Time) {
@@ -420,22 +422,11 @@ func expireFiveHourLocked(now time.Time) {
 	quotaProbeUsed = false
 }
 
-func chatPredictedOverLocked(model string, headers http.Header, body []byte, blockAt float64) bool {
-	if !fiveHourUtilOK || unitsPerUtil <= 0 {
-		return false
-	}
-	est := estimateNextChatUnitsLocked(model, headers, body)
-	if est <= 0 {
-		return false
-	}
-	return fiveHourUtil+float64(est)/unitsPerUtil >= blockAt
-}
-
-// shouldBlockChat is local: it never contacts Anthropic. Crossing the stop
-// line (or a request predicted to land past it) keeps blocking chat until
-// utilization drops or the 5h Reset time passes. Compact / /compact is
-// allowed through. If chat and keepalive are both paused and no Reset time
-// is known, one chat probe is allowed so the window cannot deadlock.
+// shouldBlockChat is local: it never contacts Anthropic. Only the actual
+// 5h utilization (or local unit cap when headers are missing) trips it —
+// a cache-miss rewrite is not used to predict the next turn. Compact is
+// allowed through. If chat and keepalive are both paused and no Reset
+// time is known, one chat probe is allowed so the window cannot deadlock.
 func shouldBlockChat(now time.Time, model string, headers http.Header, body []byte) bool {
 	if isCompactRequest(headers, body) {
 		return false
@@ -447,7 +438,7 @@ func shouldBlockChat(now time.Time, model string, headers http.Header, body []by
 		quotaProbeUsed = false
 		return false
 	}
-	over := snap.ChatOverLimit || chatPredictedOverLocked(model, headers, body, float64(snap.BlockAtPercent)/100)
+	over := snap.ChatOverLimit
 	if !over {
 		quotaProbeUsed = false
 		return false
@@ -655,7 +646,7 @@ func chatGuardResponse() pluginapi.RequestInterceptResponse {
 	mu.Unlock()
 	msg := "CPA 对话已停在停线，等到 5 小时额度刷新或用量掉回停线以下。/compact 不受影响。"
 	if !reset.IsZero() {
-		msg = fmt.Sprintf("CPA 对话已停在停线，等到 5 小时额度刷新（%s）或用量掉回停线以下。/compact 不受影响。", reset.UTC().Format("2006-01-02 15:04:05 UTC"))
+		msg = fmt.Sprintf("CPA 对话已停在停线，等到 5 小时额度刷新（%s）或用量掉回停线以下。/compact 不受影响。", formatTime(reset))
 	}
 	body, _ := json.Marshal(map[string]any{
 		"type": "error",

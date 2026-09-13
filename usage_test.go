@@ -101,8 +101,37 @@ func TestKeepaliveCacheShowsOnStatus(t *testing.T) {
 	if !strings.Contains(html, "未命中") {
 		t.Fatal("status should show cache miss")
 	}
+	if strings.Contains(html, "已暂停") {
+		t.Fatal("first expensive ping must keep the next slot so the paid rewrite can refresh")
+	}
+	recordUsage(pluginapi.UsageRecord{
+		Provider: "claude",
+		Model:    "claude-opus-5",
+		Detail: pluginapi.UsageDetail{
+			InputTokens:         2,
+			CacheCreationTokens: 298100,
+			OutputTokens:        1,
+		},
+		ResponseHeaders: http.Header{
+			"Anthropic-Ratelimit-Unified-5h-Status":      []string{"allowed"},
+			"Anthropic-Ratelimit-Unified-5h-Utilization": []string{"0.41"},
+		},
+	})
+	html = renderStatusHTML()
 	if !strings.Contains(html, "已暂停") {
-		t.Fatal("expensive ping should pause the next slot")
+		t.Fatal("second expensive ping should pause the next slot")
+	}
+}
+
+func TestEstimatePingUnitsIgnoresMissWrite(t *testing.T) {
+	got := estimatePingUnits(session{
+		LastPingUnits:      600000,
+		LastPingCacheRead:  30301,
+		LastPingCacheWrite: 628001,
+		LastChatUnits:      80000,
+	})
+	if got != 10000 {
+		t.Fatalf("next ping after a miss rewrite should look cheap, got %d", got)
 	}
 }
 
@@ -702,7 +731,7 @@ func TestCalibratesUnitsPerUtilFromChat(t *testing.T) {
 	}
 }
 
-func TestOvershootPredictionBlocksLargeChat(t *testing.T) {
+func TestOvershootPredictionDoesNotBlock(t *testing.T) {
 	resetSessionsForTest()
 	t.Cleanup(resetSessionsForTest)
 	body := claudeBody("别把额度用光", "sys")
@@ -713,24 +742,31 @@ func TestOvershootPredictionBlocksLargeChat(t *testing.T) {
 	id := sessionKey("claude-opus-5", nil, body)
 	sessions[id] = &session{ID: id, Model: "claude-opus-5", Body: body, LastChatUnits: 15000}
 	mu.Unlock()
-	if !terminatedChat(t, body) {
-		t.Fatal("90% + 15% predicted should block before punching through 100%")
+	if terminatedChat(t, body) {
+		t.Fatal("90% must not block just because the last turn looked expensive")
 	}
 }
 
-func TestOvershootAllowsSmallFollowUp(t *testing.T) {
+func TestGuardChatOffAllowsPastStopLine(t *testing.T) {
 	resetSessionsForTest()
 	t.Cleanup(resetSessionsForTest)
-	body := claudeBody("短回复", "sys")
-	mu.Lock()
-	fiveHourUtil = 0.90
-	fiveHourUtilOK = true
-	unitsPerUtil = 100000
-	id := sessionKey("claude-opus-5", nil, body)
-	sessions[id] = &session{ID: id, Model: "claude-opus-5", Body: body, LastChatUnits: 1000}
-	mu.Unlock()
+	setGuardChat(false)
+	recordUsage(pluginapi.UsageRecord{
+		Provider: "claude",
+		Model:    "claude-opus-5",
+		Detail:   pluginapi.UsageDetail{InputTokens: 100, OutputTokens: 1},
+		ResponseHeaders: http.Header{
+			"Anthropic-Ratelimit-Unified-5h-Status":      []string{"allowed"},
+			"Anthropic-Ratelimit-Unified-5h-Utilization": []string{"0.98"},
+		},
+	})
+	body := claudeBody("继续聊", "sys")
 	if terminatedChat(t, body) {
-		t.Fatal("90% + 1% should still go upstream")
+		t.Fatal("guard off must not local-429 even at 98%")
+	}
+	html := renderStatusHTML()
+	if !strings.Contains(html, "未拦对话") {
+		t.Fatalf("status should show guard off: %s", html)
 	}
 }
 

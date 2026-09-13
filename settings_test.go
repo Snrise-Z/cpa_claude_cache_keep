@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,5 +108,56 @@ func TestHandleStatusStopRedirects(t *testing.T) {
 	snap := currentBudget(time.Now())
 	if snap.BlockAtPercent != 92 {
 		t.Fatalf("block=%d", snap.BlockAtPercent)
+	}
+}
+
+func TestHandleStatusGuardRedirects(t *testing.T) {
+	resetSessionsForTest()
+	t.Cleanup(resetSessionsForTest)
+	dir := t.TempDir()
+	mu.Lock()
+	settingsPath = filepath.Join(dir, "s.json")
+	persistSettings = true
+	mu.Unlock()
+
+	raw, err := json.Marshal(pluginapi.ManagementRequest{
+		Path:  "/v0/resource/plugins/claude-cache-keepalive/status",
+		Query: url.Values{"guard": {"0"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := handleStatusRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatal(err)
+	}
+	var out pluginapi.ManagementResponse
+	if err := json.Unmarshal(env.Result, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status=%d", out.StatusCode)
+	}
+	if currentBudget(time.Now()).GuardChat {
+		t.Fatal("guard should be off")
+	}
+	saved, err := os.ReadFile(filepath.Join(dir, "s.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(saved), `"guard_chat": false`) {
+		t.Fatalf("saved=%s", saved)
+	}
+
+	mu.Lock()
+	cfg = defaultConfig()
+	mu.Unlock()
+	applyConfig(nil)
+	if currentBudget(time.Now()).GuardChat {
+		t.Fatal("reloaded guard should stay off")
 	}
 }

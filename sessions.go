@@ -25,6 +25,7 @@ type session struct {
 	LastPingUnits      int64
 	LastPingCacheRead  int64
 	LastPingCacheWrite int64
+	PingMissStreak     int
 	PingExpensive      bool
 	Info               bodyInfo
 }
@@ -62,6 +63,7 @@ func upsertSession(model, sourceFormat, toFormat string, headers http.Header, bo
 		existing.SavedAt = now
 		existing.LastSeen = now
 		existing.Info = info
+		existing.PingMissStreak = 0
 		existing.PingExpensive = false
 		return
 	}
@@ -72,7 +74,7 @@ func upsertSession(model, sourceFormat, toFormat string, headers http.Header, bo
 	sessions[id] = &session{
 		ID:           id,
 		Label:        label,
-		Enabled:      true,
+		Enabled:      false,
 		Model:        model,
 		SourceFormat: sourceFormat,
 		ToFormat:     toFormat,
@@ -264,6 +266,9 @@ func evictSessionsLocked(now time.Time, keep int) {
 			}
 		}
 	}
+	// Over the cap, drop unchecked (not keepalive) first, then the
+	// least-recently-seen session. Keepalive rows stay until nothing
+	// else can be replaced.
 	for len(sessions) > keep {
 		dropID := ""
 		var dropSeen time.Time

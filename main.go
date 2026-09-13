@@ -70,7 +70,7 @@ import (
 
 const (
 	pluginID      = "claude-cache-keepalive"
-	pluginVersion = "0.8.7"
+	pluginVersion = "0.8.11"
 )
 
 type envelope struct {
@@ -240,7 +240,7 @@ func pluginRegistration() registration {
 				{Name: "stop_percent", Type: pluginapi.ConfigFieldTypeInteger, Description: "Stop CPA chat at this 5-hour utilization percent. Default 95. Status page can change it; 60-99."},
 				{Name: "reserve_percent", Type: pluginapi.ConfigFieldTypeInteger, Description: "How much of the 5-hour window to leave after stop_percent. Default 5. Ignored if stop_percent is set."},
 				{Name: "five_hour_budget", Type: pluginapi.ConfigFieldTypeInteger, Description: "Fallback weighted budget if upstream 5h headers are missing. 0 uses Anthropic utilization headers."},
-				{Name: "guard_chat", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Block new Claude chat through CPA once the 5-hour window hits the reserve line. Default true."},
+				{Name: "guard_chat", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Block new Claude chat through CPA once 5h utilization actually reaches stop_percent. Default true. Status page can toggle it."},
 				{Name: "messages_url", Type: pluginapi.ConfigFieldTypeString, Description: "CPA /v1/messages URL used for keepalive replay. Default http://127.0.0.1:8317/v1/messages."},
 			},
 		},
@@ -258,8 +258,14 @@ func applyConfig(request []byte) {
 		_ = json.Unmarshal(request, &req)
 	}
 	next := parseConfig(req.ConfigYAML)
-	if stop, ok := loadPersistedStopPercent(); ok {
-		next.ReservePercent = 100 - stop
+	if saved, ok := loadPersistedSettings(); ok {
+		if saved.StopPercent != 0 {
+			next.ReservePercent = 100 - saved.StopPercent
+		}
+		if saved.GuardChat != nil {
+			v := *saved.GuardChat
+			next.GuardChat = &v
+		}
 	}
 	mu.Lock()
 	cfg = next
@@ -340,6 +346,10 @@ func handleStatusRequest(raw []byte) ([]byte, error) {
 	}
 	if stop, ok := parseStopQuery(queryGet(req.Query, "stop")); ok {
 		setStopPercent(stop)
+		redirect = true
+	}
+	if on, ok := parseGuardQuery(queryGet(req.Query, "guard")); ok {
+		setGuardChat(on)
 		redirect = true
 	}
 	if redirect && strings.TrimSpace(req.Path) != "" {
@@ -517,6 +527,7 @@ func pingSessionNow(id string) error {
 	messagesURL := cfg.MessagesURL
 	if item := sessions[id]; item != nil {
 		item.PingExpensive = false
+		item.PingMissStreak = 0
 	}
 	mu.Unlock()
 	err := pingSession(snap, maxTokens, messagesURL)
