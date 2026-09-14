@@ -43,6 +43,11 @@ type statusView struct {
 	KeepPaused     bool
 	HasReset       bool
 	UsedKnown      bool
+	BudgetUsed7d   string
+	HasReset7d     bool
+	Used7dKnown    bool
+	Reset7dAt      string
+	Reset7dIn      string
 	ResetAt        string
 	ResetIn        string
 	HasQuotaLog    bool
@@ -130,6 +135,11 @@ func buildStatusView(st statusPage) statusView {
 		KeepPaused:     st.Budget.KeepalivePaused,
 		HasReset:       !st.Budget.ResetAt.IsZero(),
 		UsedKnown:      st.Budget.UsedKnown,
+		BudgetUsed7d:   formatPercent(st.Budget.Used7dPercent, st.Budget.Used7dKnown),
+		HasReset7d:     !st.Budget.Reset7d.IsZero(),
+		Used7dKnown:    st.Budget.Used7dKnown,
+		Reset7dAt:      formatTime(st.Budget.Reset7d),
+		Reset7dIn:      formatUntil(st.Now, st.Budget.Reset7d),
 		ResetAt:        formatTime(st.Budget.ResetAt),
 		ResetIn:        formatUntil(st.Now, st.Budget.ResetAt),
 		Version:        st.Version,
@@ -306,6 +316,9 @@ func buildQuotaRow(now time.Time, sample quotaSample) quotaRow {
 	if sample.RawStatus7d != "" {
 		raw = append(raw, "7d-status="+sample.RawStatus7d)
 	}
+	if sample.RawReset7d != "" {
+		raw = append(raw, "7d-reset="+sample.RawReset7d)
+	}
 	if sample.UnifiedStatus != "" {
 		raw = append(raw, "unified="+sample.UnifiedStatus)
 	}
@@ -470,8 +483,9 @@ h1 { margin: 0 0 6px; font-size: 24px; letter-spacing: -.02em; }
 .state-empty { color: var(--empty); background: var(--empty-bg); }
 .state-error { color: var(--err); background: var(--err-bg); }
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+.stats.budget { grid-template-columns: 1fr 1fr 2fr; }
 @media (max-width: 760px) {
-  .stats { grid-template-columns: 1fr 1fr; }
+  .stats, .stats.budget { grid-template-columns: 1fr 1fr; }
   main { padding: 20px 16px 36px; }
 }
 .stat {
@@ -624,8 +638,9 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
     <div class="stat"><div class="k">上次保活</div><div class="v">{{.LastPing}}<small>{{.LastPingAgo}}</small></div></div>
     <div class="stat"><div class="k">最近一次到期</div><div class="v">{{.NextPing}}<small>{{.NextPingAgo}}</small></div></div>
   </div>
-  <div class="stats">
+  <div class="stats budget">
     <div class="stat"><div class="k">5 小时已用</div><div class="v">{{.BudgetUsed}}<small>CPA 对话停在 {{.BudgetBlock}}{{if .HasReset}} · 刷新 {{.ResetAt}}（{{.ResetIn}}）{{else if .UsedKnown}} · 还没读到刷新时间{{end}}</small></div></div>
+    <div class="stat"><div class="k">7 天已用</div><div class="v">{{.BudgetUsed7d}}<small>{{if .HasReset7d}}刷新 {{.Reset7dAt}}（{{.Reset7dIn}}）{{else if .Used7dKnown}}还没读到刷新时间{{else}}等下一发带上 7 天用量头{{end}}</small></div></div>
     <div class="stat"><div class="k">CPA 对话 / 保活</div><div class="v">{{.BudgetChat}} / {{.BudgetKeep}}<small>{{.BudgetNote}}</small></div></div>
   </div>
   <form class="stop-form" data-stop action="" method="get">

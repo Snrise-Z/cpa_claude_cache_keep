@@ -332,6 +332,10 @@ func resetSessionsForTest() {
 	unitsPerUtil = 0
 	quotaSamples = nil
 	fiveHourReset = time.Time{}
+	sevenDayUtil = 0
+	sevenDayUtilOK = false
+	sevenDayStatus = ""
+	sevenDayReset = time.Time{}
 	quotaProbeUsed = false
 	subagentSkipped = 0
 	lastSubagentAt = time.Time{}

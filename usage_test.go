@@ -569,6 +569,54 @@ func TestStatusShowsFiveHourReset(t *testing.T) {
 	}
 }
 
+func TestStatusShowsSevenDayUsage(t *testing.T) {
+	resetSessionsForTest()
+	t.Cleanup(resetSessionsForTest)
+	future := fmt.Sprintf("%d", time.Now().Add(40*time.Hour).Unix())
+	recordUsage(pluginapi.UsageRecord{
+		Provider: "claude",
+		Model:    "claude-opus-5",
+		Detail:   pluginapi.UsageDetail{InputTokens: 100, OutputTokens: 1},
+		ResponseHeaders: http.Header{
+			"Anthropic-Ratelimit-Unified-5h-Status":      []string{"allowed"},
+			"Anthropic-Ratelimit-Unified-5h-Utilization": []string{"0.28"},
+			"Anthropic-Ratelimit-Unified-7d-Status":      []string{"allowed"},
+			"Anthropic-Ratelimit-Unified-7d-Utilization": []string{"0.54"},
+			"Anthropic-Ratelimit-Unified-7d-Reset":       []string{future},
+		},
+	})
+	html := renderStatusHTML()
+	if !strings.Contains(html, "7 天已用") {
+		t.Fatalf("missing 7d card: %s", html)
+	}
+	if !strings.Contains(html, "54%") {
+		t.Fatalf("missing 7d percent: %s", html)
+	}
+	if !strings.Contains(html, "刷新") {
+		t.Fatalf("missing 7d reset: %s", html)
+	}
+}
+
+func TestSevenDayClearsAfterReset(t *testing.T) {
+	resetSessionsForTest()
+	t.Cleanup(resetSessionsForTest)
+	past := fmt.Sprintf("%d", time.Now().Add(-2*time.Hour).Unix())
+	recordUsage(pluginapi.UsageRecord{
+		Provider: "claude",
+		Model:    "claude-opus-5",
+		Detail:   pluginapi.UsageDetail{InputTokens: 100, OutputTokens: 1},
+		ResponseHeaders: http.Header{
+			"Anthropic-Ratelimit-Unified-7d-Status":      []string{"allowed"},
+			"Anthropic-Ratelimit-Unified-7d-Utilization": []string{"0.80"},
+			"Anthropic-Ratelimit-Unified-7d-Reset":       []string{past},
+		},
+	})
+	snap := currentBudget(time.Now())
+	if snap.Used7dKnown {
+		t.Fatalf("expired 7d window should clear: %+v", snap)
+	}
+}
+
 func TestQuotaLogKeepsFiveNewest(t *testing.T) {
 	resetSessionsForTest()
 	t.Cleanup(resetSessionsForTest)
@@ -630,6 +678,9 @@ func TestQuotaLogShowsRawFiveHourHeaders(t *testing.T) {
 	}
 	if !strings.Contains(html, "37.0%") && !strings.Contains(html, "37%") {
 		t.Fatalf("missing parsed 5h percent: %s", html)
+	}
+	if !strings.Contains(html, "7 天已用") || !strings.Contains(html, "12%") {
+		t.Fatalf("top card should show weekly usage: %s", html)
 	}
 	got := listQuotaSamples()
 	if len(got) != 1 || !got[0].HeaderOK || got[0].Util5h < 0.36 {

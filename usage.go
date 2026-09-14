@@ -40,8 +40,10 @@ type quotaSample struct {
 	Header7dOK    bool
 	Util7d        float64
 	Status7d      string
+	Reset7d       time.Time
 	RawUtil7d     string
 	RawStatus7d   string
+	RawReset7d    string
 	UnifiedStatus string
 	Units         int64
 	CacheRead     int64
@@ -67,6 +69,10 @@ type budgetSnapshot struct {
 	GuardChat       bool
 	UsedPercent     float64
 	UsedKnown       bool
+	Used7dPercent   float64
+	Used7dKnown     bool
+	Reset7d         time.Time
+	Status7d        string
 	BlockAtPercent  int
 }
 
@@ -84,6 +90,10 @@ var (
 	unitsPerUtil    float64 // weighted units that move utilization by 1.0 (100%)
 	quotaSamples    []quotaSample
 	fiveHourReset   time.Time
+	sevenDayUtil    float64
+	sevenDayUtilOK  bool
+	sevenDayStatus  string
+	sevenDayReset   time.Time
 	quotaProbeUsed  bool // one chat probe after both chat+keepalive stopped with no Reset time
 )
 
@@ -235,6 +245,7 @@ func parseQuotaSample(rec pluginapi.UsageRecord, now time.Time, keepalive bool) 
 	rawReset5h := headerGetCI(h, "Anthropic-Ratelimit-Unified-5h-Reset")
 	rawUtil7d := headerGetCI(h, "Anthropic-Ratelimit-Unified-7d-Utilization")
 	rawStatus7d := headerGetCI(h, "Anthropic-Ratelimit-Unified-7d-Status")
+	rawReset7d := headerGetCI(h, "Anthropic-Ratelimit-Unified-7d-Reset")
 	sample := quotaSample{
 		At:            now,
 		Keepalive:     keepalive,
@@ -245,8 +256,10 @@ func parseQuotaSample(rec pluginapi.UsageRecord, now time.Time, keepalive bool) 
 		RawReset5h:    rawReset5h,
 		RawUtil7d:     rawUtil7d,
 		RawStatus7d:   strings.ToLower(rawStatus7d),
+		RawReset7d:    rawReset7d,
 		UnifiedStatus: strings.ToLower(headerGetCI(h, "Anthropic-Ratelimit-Unified-Status")),
 		Reset5h:       parseUnixTime(rawReset5h),
+		Reset7d:       parseUnixTime(rawReset7d),
 	}
 	sample.CacheRead, sample.CacheWrite = cacheTokensFromDetail(rec.Detail)
 	if rec.Failed {
@@ -377,6 +390,14 @@ func recordUsage(rec pluginapi.UsageRecord) {
 			}
 		}
 	}
+	if sample.Header7dOK {
+		sevenDayUtil = sample.Util7d
+		sevenDayStatus = sample.Status7d
+		sevenDayUtilOK = true
+		if !sample.Reset7d.IsZero() {
+			sevenDayReset = sample.Reset7d
+		}
+	}
 	if units <= 0 && !rec.Failed {
 		return
 	}
@@ -420,6 +441,16 @@ func expireFiveHourLocked(now time.Time) {
 	lastCalibOK = false
 	lastCalibUtil = 0
 	quotaProbeUsed = false
+}
+
+func expireSevenDayLocked(now time.Time) {
+	if sevenDayReset.IsZero() || now.Before(sevenDayReset) {
+		return
+	}
+	sevenDayUtil = 0
+	sevenDayUtilOK = false
+	sevenDayStatus = ""
+	sevenDayReset = time.Time{}
 }
 
 // shouldBlockChat is local: it never contacts Anthropic. Only the actual
@@ -523,6 +554,7 @@ func currentBudget(now time.Time) budgetSnapshot {
 
 func currentBudgetLocked(now time.Time) budgetSnapshot {
 	expireFiveHourLocked(now)
+	expireSevenDayLocked(now)
 	trimUsageLocked(now)
 	chat, keep := sumUsageLocked()
 	reserve := cfg.ReservePercent
@@ -549,7 +581,13 @@ func currentBudgetLocked(now time.Time) budgetSnapshot {
 		GuardChat:      cfg.guardChat(),
 		LimitHitUntil:  limitHitUntil,
 		ResetAt:        fiveHourReset,
+		Reset7d:        sevenDayReset,
 		BlockAtPercent: 100 - reserve,
+	}
+	if sevenDayUtilOK {
+		snap.Used7dKnown = true
+		snap.Used7dPercent = sevenDayUtil * 100
+		snap.Status7d = sevenDayStatus
 	}
 	blockAt := float64(snap.BlockAtPercent) / 100
 	if fiveHourUtilOK {
