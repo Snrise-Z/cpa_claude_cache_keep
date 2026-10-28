@@ -18,6 +18,7 @@ type statusView struct {
 	IdleEvictMin   int
 	SessionCount   int
 	EnabledCount   int
+	BackgroundCnt  int
 	HasSessions    bool
 	Sessions       []sessionRow
 	LastPing       string
@@ -44,6 +45,10 @@ type statusView struct {
 	HasReset       bool
 	UsedKnown      bool
 	BudgetUsed7d   string
+	Bar5h          int
+	Tone5h         string
+	Bar7d          int
+	Tone7d         string
 	HasReset7d     bool
 	Used7dKnown    bool
 	Reset7dAt      string
@@ -75,6 +80,9 @@ type quotaRow struct {
 type sessionRow struct {
 	ID          string
 	Label       string
+	TitleSource string
+	TitleTag    string
+	Background  bool
 	Model       string
 	Enabled     bool
 	ToggleHref  string
@@ -144,6 +152,10 @@ func buildStatusView(st statusPage) statusView {
 		ResetIn:        formatUntil(st.Now, st.Budget.ResetAt),
 		Version:        st.Version,
 		HasQuotaLog:    len(st.QuotaLog) > 0,
+		Bar5h:          meterWidth(st.Budget.UsedPercent, st.Budget.UsedKnown),
+		Tone5h:         meterTone(st.Budget.UsedPercent, st.Budget.UsedKnown, float64(st.Budget.BlockAtPercent)),
+		Bar7d:          meterWidth(st.Budget.Used7dPercent, st.Budget.Used7dKnown),
+		Tone7d:         meterTone(st.Budget.Used7dPercent, st.Budget.Used7dKnown, 95),
 	}
 	if st.SubagentSkipped > 0 {
 		view.SubagentNote = fmt.Sprintf("已跳过 %d 次子代理请求，不进保活名单。最近：%s %s（%s）", st.SubagentSkipped, dash(st.LastSubagentKind), st.LastSubagentLabel, formatAgo(st.Now, st.LastSubagentAt))
@@ -178,6 +190,7 @@ func buildStatusView(st statusPage) statusView {
 		row := sessionRow{
 			ID:          item.ID,
 			Label:       item.Label,
+			Background:  item.Background,
 			Model:       dash(item.Model),
 			Enabled:     item.Enabled,
 			ToggleHref:  toggleHref(item.ID, !item.Enabled),
@@ -211,6 +224,17 @@ func buildStatusView(st statusPage) statusView {
 			row.RowClass = "error"
 		case item.Enabled:
 			row.RowClass = "on"
+		}
+		switch {
+		case item.CustomLabel:
+			row.TitleSource, row.TitleTag = "custom", "自定义名称"
+		case item.AITitle:
+			row.TitleSource, row.TitleTag = "ai", "Claude 标题"
+		default:
+			row.TitleSource, row.TitleTag = "prompt", "首条消息"
+		}
+		if item.Background {
+			view.BackgroundCnt++
 		}
 		view.Sessions = append(view.Sessions, row)
 	}
@@ -249,6 +273,28 @@ func buildStatusView(st statusPage) statusView {
 		view.StateHint = fmt.Sprintf("已勾选 %d 路。下次保活按各会话最后一次请求对齐，间隔 %d 分钟，输出上限 max_tokens=%d。", st.EnabledCount, st.IntervalMin, st.MaxTokens)
 	}
 	return view
+}
+
+func meterWidth(pct float64, known bool) int {
+	if !known || pct <= 0 {
+		return 0
+	}
+	if pct >= 100 {
+		return 100
+	}
+	return int(pct + 0.5)
+}
+
+func meterTone(pct float64, known bool, stop float64) string {
+	switch {
+	case !known:
+		return "idle"
+	case pct >= stop:
+		return "err"
+	case pct >= stop-15:
+		return "warn"
+	}
+	return "ok"
 }
 
 func toggleHref(id string, enable bool) string {
@@ -435,282 +481,378 @@ const statusHTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
 <title>缓存保活</title>
 <style>
 :root {
-  --bg: #0f1115;
-  --panel: #171a21;
-  --panel-2: #1e232d;
-  --line: #2a3140;
-  --text: #e7eaf0;
-  --muted: #8b93a7;
-  --ok: #3dd68c;
-  --ok-bg: rgba(61,214,140,.12);
-  --armed: #7aa2ff;
-  --armed-bg: rgba(122,162,255,.12);
-  --empty: #8b93a7;
-  --empty-bg: rgba(139,147,167,.12);
-  --err: #ff6b6b;
-  --err-bg: rgba(255,107,107,.12);
-  --warn: #f5c14a;
+  --bg: #fcfaf6;
+  --bg-deep: #f2ede4;
+  --card: #fffefc;
+  --card-soft: #faf7f1;
+  --line: #ede7dc;
+  --line-strong: #ddd5c5;
+  --text: #2e2a24;
+  --text-2: #5d564b;
+  --muted: #958b7b;
+  --ink: #3c3a35;
+  --accent: #b5683f;
+  --accent-soft: #f6e7dc;
+  --ok: #4c7a5a;
+  --ok-soft: #e5efe5;
+  --armed: #49698a;
+  --armed-soft: #e6edf3;
+  --warn: #a7761e;
+  --warn-soft: #f7eed8;
+  --err: #b0493a;
+  --err-soft: #f8e6e1;
+  --idle: #a69c8b;
+  --idle-soft: #efe9dd;
+  --radius: 16px;
+  --shadow: 0 1px 1px rgba(76, 60, 36, .04), 0 8px 24px -14px rgba(76, 60, 36, .22);
+  --shadow-lift: 0 1px 1px rgba(76, 60, 36, .05), 0 14px 32px -16px rgba(76, 60, 36, .3);
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", "STSong", Georgia, serif;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
-html, body {
-  margin: 0;
-  background: var(--bg);
-  color-scheme: dark;
-}
+html { background: var(--bg); color-scheme: light; }
 body {
+  margin: 0;
   color: var(--text);
   background:
-    radial-gradient(1200px 500px at 10% -10%, rgba(122,162,255,.16), transparent 55%),
-    radial-gradient(900px 400px at 100% 0%, rgba(61,214,140,.08), transparent 50%),
+    radial-gradient(1100px 520px at -5% -12%, #fffefb 0%, transparent 62%),
+    radial-gradient(900px 480px at 105% -8%, #f7f2e9 0%, transparent 58%),
     var(--bg);
-  font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  background-attachment: fixed;
+  font: 14.5px/1.6 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
-main { max-width: 980px; margin: 0 auto; padding: 28px 20px 48px; }
-.top { display: flex; gap: 16px; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; margin-bottom: 22px; }
-h1 { margin: 0 0 6px; font-size: 24px; letter-spacing: -.02em; }
-.lead { margin: 0; color: var(--muted); max-width: 46rem; }
+main { max-width: 1040px; margin: 0 auto; padding: 40px 24px 56px; }
+a { color: inherit; }
+
+/* header */
+.top { display: flex; gap: 20px; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; margin-bottom: 28px; }
+.eyebrow { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; letter-spacing: .08em; margin-bottom: 10px; }
+.eyebrow .mark { width: 18px; height: 18px; border-radius: 6px; background: linear-gradient(145deg, #d98a5f, var(--accent)); box-shadow: inset 0 0 0 1px rgba(255,255,255,.35); position: relative; }
+.eyebrow .mark::after { content: ""; position: absolute; inset: 5px; border-radius: 50%; border: 1.5px solid rgba(255,253,249,.92); }
+h1 { margin: 0 0 8px; font: 600 30px/1.2 var(--serif); letter-spacing: -.01em; color: var(--ink); }
+.lead { margin: 0; color: var(--text-2); max-width: 44rem; }
 .badge {
-  display: inline-flex; align-items: center; gap: 8px;
-  padding: 8px 12px; border-radius: 999px; font-weight: 600; font-size: 13px;
-  border: 1px solid transparent;
+  display: inline-flex; align-items: center; gap: 9px;
+  padding: 8px 14px 8px 12px; border-radius: 999px;
+  font-weight: 600; font-size: 13px; white-space: nowrap;
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  background: var(--card); box-shadow: var(--shadow);
 }
-.badge .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 18%, transparent); }
-.state-ok { color: var(--ok); background: var(--ok-bg); }
-.state-armed { color: var(--armed); background: var(--armed-bg); }
-.state-empty { color: var(--empty); background: var(--empty-bg); }
-.state-error { color: var(--err); background: var(--err-bg); }
-.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
-.stats.budget { grid-template-columns: 1fr 1fr 2fr; }
-@media (max-width: 760px) {
-  .stats, .stats.budget { grid-template-columns: 1fr 1fr; }
-  main { padding: 20px 16px 36px; }
-}
-.stat {
-  background: linear-gradient(180deg, var(--panel), var(--panel-2));
+.badge .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 16%, transparent); }
+.state-ok { color: var(--ok); }
+.state-armed { color: var(--armed); }
+.state-empty { color: var(--idle); }
+.state-error { color: var(--err); }
+.state-ok .dot { animation: breathe 2.6s ease-in-out infinite; }
+@keyframes breathe { 50% { box-shadow: 0 0 0 7px color-mix(in srgb, currentColor 6%, transparent); } }
+
+/* stat cards */
+.grid { display: grid; gap: 14px; margin-bottom: 14px; }
+.grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.grid.quota { grid-template-columns: 1fr 1fr 1.6fr; }
+.card {
+  background: var(--card);
   border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 12px 14px;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
 }
-.stat .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
-.stat .v { margin-top: 4px; font-variant-numeric: tabular-nums; font-weight: 600; }
-.stat .v small { display: block; color: var(--muted); font-weight: 400; font-size: 12px; margin-top: 2px; }
-.empty {
-  margin-top: 6px;
-  padding: 18px;
-  border: 1px dashed var(--line);
-  border-radius: 16px;
-  color: var(--muted);
-  background: rgba(255,255,255,.02);
+.stat { padding: 16px 18px 15px; min-width: 0; }
+.k { color: var(--muted); font-size: 12px; letter-spacing: .06em; }
+.v { margin-top: 6px; font: 600 24px/1.2 var(--serif); color: var(--ink); font-variant-numeric: tabular-nums; }
+.v .unit { margin-left: 6px; font: 400 13px/1 var(--sans); color: var(--muted); }
+.v.sm { font: 600 14.5px/1.45 var(--sans); color: var(--text); }
+.s { margin-top: 6px; color: var(--muted); font-size: 12.5px; line-height: 1.55; }
+.bar { position: relative; height: 8px; margin-top: 12px; border-radius: 999px; background: var(--bg-deep); overflow: visible; }
+.bar .fill { position: absolute; inset: 0 auto 0 0; border-radius: inherit; background: var(--ok); transition: width .6s ease; }
+.bar.tone-warn .fill { background: var(--warn); }
+.bar.tone-err .fill { background: var(--err); }
+.bar.tone-idle .fill { background: var(--idle); }
+.bar .stopline { position: absolute; top: -4px; bottom: -4px; width: 2px; margin-left: -1px; border-radius: 2px; background: var(--ink); opacity: .55; }
+
+/* controls */
+.controls {
+  display: flex; gap: 12px 18px; align-items: center; flex-wrap: wrap;
+  padding: 12px 16px; margin: 0 0 30px;
+  background: var(--card-soft);
 }
-.list { display: flex; flex-direction: column; gap: 10px; }
-.session {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 12px;
-  align-items: start;
-  background: linear-gradient(180deg, var(--panel), var(--panel-2));
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 14px 14px 12px;
+.ctl { display: inline-flex; align-items: center; gap: 10px; }
+.field { display: inline-flex; align-items: center; gap: 4px; padding: 0 10px 0 2px; background: var(--card); border: 1px solid var(--line-strong); border-radius: 10px; transition: border-color .15s, box-shadow .15s; }
+.field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.field input { width: 3.4rem; border: 0; outline: 0; background: transparent; color: var(--ink); padding: 7px 0 7px 8px; font: 600 15px var(--sans); font-variant-numeric: tabular-nums; }
+.field span { color: var(--muted); }
+.controls .hint { flex: 1 1 18rem; margin: 0; color: var(--muted); font-size: 12.5px; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 7px 13px; border-radius: 10px; cursor: pointer;
+  font: 600 12.5px/1.2 var(--sans); text-decoration: none; white-space: nowrap;
+  color: var(--ink); background: var(--card); border: 1px solid var(--line-strong);
+  transition: background .15s, border-color .15s, color .15s, transform .15s;
 }
-.session.on { box-shadow: inset 3px 0 0 var(--ok); }
-.session.off { opacity: .78; }
-.session.error { box-shadow: inset 3px 0 0 var(--err); }
-.cb {
-  width: 28px; height: 28px; margin-top: 2px;
-  border-radius: 8px; border: 1px solid var(--line);
-  background: #11141a; color: var(--muted);
-  display: grid; place-items: center;
+.btn:hover { border-color: var(--muted); }
+.btn:active { transform: translateY(1px); }
+.btn.primary { color: #fffaf4; background: var(--accent); border-color: var(--accent); }
+.btn.primary:hover { background: #a65b34; border-color: #a65b34; }
+.btn.quiet { background: transparent; border-color: transparent; color: var(--muted); font-weight: 500; }
+.btn.quiet.danger:hover { color: var(--err); background: var(--err-soft); }
+.btn[aria-busy="true"] { opacity: .6; pointer-events: none; }
+.toggle {
+  display: inline-flex; align-items: center; gap: 9px; text-decoration: none;
+  font-size: 12.5px; font-weight: 600; color: var(--text-2);
+}
+.switch {
+  position: relative; display: inline-block; flex: none;
+  width: 38px; height: 22px; border-radius: 999px;
+  background: var(--line-strong); transition: background .2s;
   text-decoration: none;
 }
-.cb.on { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 55%, var(--line)); background: var(--ok-bg); }
-.cb .mark { font-size: 16px; line-height: 1; }
-h3 { margin: 0 0 4px; font-size: 15px; font-weight: 650; letter-spacing: -.01em; word-break: break-word; }
-.stop-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 16px; }
-.stop-form .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
-.stop-form input {
-  width: 4.5rem; background: #11141a; color: var(--text);
-  border: 1px solid var(--line); border-radius: 8px;
-  padding: 6px 8px; font: inherit; font-weight: 650; font-size: 15px;
+.switch::after {
+  content: ""; position: absolute; top: 3px; left: 3px;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(60, 45, 25, .3);
+  transition: transform .2s;
+}
+.switch.on { background: var(--ok); }
+.switch.on::after { transform: translateX(16px); }
+.toggle:hover .switch, .switch:hover { filter: brightness(.96); }
+
+/* sessions */
+.section-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 0 0 14px; }
+h2 { margin: 0; font: 600 19px/1.3 var(--serif); color: var(--ink); }
+.count { display: inline-grid; place-items: center; min-width: 24px; height: 22px; padding: 0 7px; border-radius: 999px; background: var(--bg-deep); color: var(--text-2); font-size: 12px; font-weight: 600; }
+.section-head .note { color: var(--muted); font-size: 12.5px; }
+.list { display: flex; flex-direction: column; gap: 12px; }
+.session {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "sw body act";
+  gap: 6px 16px; align-items: start;
+  padding: 16px 18px 14px;
+  position: relative; overflow: hidden;
+  transition: box-shadow .2s, border-color .2s;
+}
+.session:hover { box-shadow: var(--shadow-lift); }
+.session::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: transparent; }
+.session.on::before { background: var(--ok); }
+.session.error::before { background: var(--err); }
+.session.off { background: var(--card-soft); }
+.session > .switch { grid-area: sw; margin-top: 7px; }
+.session > .body { grid-area: body; min-width: 0; }
+.session > .actions { grid-area: act; display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+.rename { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; }
+.rename .name {
+  flex: 1; min-width: 0; margin-left: -8px;
+  padding: 4px 8px; border-radius: 8px;
+  border: 1px solid transparent; background: transparent; outline: 0;
+  color: var(--ink); font: 600 17px/1.35 var(--serif);
+  text-overflow: ellipsis;
+  transition: background .15s, border-color .15s;
+}
+.rename .name:hover { background: var(--card-soft); border-color: var(--line); }
+.rename .name:focus { background: var(--card); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.rename .btn { opacity: 0; pointer-events: none; transition: opacity .15s; }
+.rename:focus-within .btn, .rename:hover .btn { opacity: 1; pointer-events: auto; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 9px; border-radius: 999px;
+  font-size: 12px; line-height: 1.6; white-space: nowrap;
+  color: var(--text-2); background: var(--bg); border: 1px solid var(--line);
   font-variant-numeric: tabular-nums;
 }
-.stop-form input:focus { outline: none; border-color: color-mix(in srgb, var(--armed) 55%, var(--line)); }
-.stop-form button {
-  color: var(--armed); background: var(--armed-bg);
-  border: 1px solid var(--line); border-radius: 8px;
-  padding: 6px 10px; font: inherit; font-size: 12px; cursor: pointer;
+.tag.src-ai { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 22%, transparent); }
+.tag.src-custom { color: var(--armed); background: var(--armed-soft); border-color: color-mix(in srgb, var(--armed) 20%, transparent); }
+.tag.src-prompt { color: var(--muted); border-style: dashed; }
+.tag.bg { color: #6d5a99; background: #eeeaf6; border-color: #ddd5ee; }
+.tag.bg::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.times { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 18px; margin: 12px 0 0; padding-top: 11px; border-top: 1px dashed var(--line); }
+.times div { min-width: 0; }
+.times dt { color: var(--muted); font-size: 11.5px; letter-spacing: .05em; }
+.times dd { margin: 2px 0 0; font-size: 12.5px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.times em { font-style: normal; color: var(--muted); }
+.times .cache { color: var(--ok); }
+.row-err { margin-top: 10px; padding: 7px 11px; border-radius: 9px; color: var(--err); background: var(--err-soft); font-size: 12.5px; }
+.empty { padding: 26px 22px; text-align: center; color: var(--text-2); border: 1.5px dashed var(--line-strong); border-radius: var(--radius); background: var(--card-soft); }
+.empty .big { display: block; margin-bottom: 6px; font: 600 17px var(--serif); color: var(--ink); }
+.hints { margin: 16px 2px 0; padding: 0; list-style: none; color: var(--muted); font-size: 12.5px; display: grid; gap: 4px; }
+.hints li { position: relative; padding-left: 14px; }
+.hints li::before { content: ""; position: absolute; left: 2px; top: .7em; width: 4px; height: 4px; border-radius: 50%; background: var(--line-strong); }
+.alert { margin: 0 0 14px; padding: 12px 16px; border-radius: 12px; font-size: 13.5px; border: 1px solid transparent; }
+.alert.warn { color: #87601a; background: var(--warn-soft); border-color: #eedcb5; }
+.alert.err { color: var(--err); background: var(--err-soft); border-color: #efcdc5; white-space: pre-wrap; margin-top: 16px; }
+
+/* quota log */
+.log { margin-top: 30px; padding: 18px 18px 10px; }
+.log .sub { margin: 4px 0 14px; color: var(--muted); font-size: 12.5px; }
+.scroll { overflow-x: auto; margin: 0 -6px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11.5px; letter-spacing: .05em; padding: 7px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 10px; border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent); vertical-align: top; color: var(--text-2); }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover td { background: var(--card-soft); }
+td .raw, td.raw { color: var(--muted); font: 11.5px/1.5 var(--mono); word-break: break-all; }
+td.raw { min-width: 16rem; }
+.kind { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: var(--bg); border: 1px solid var(--line); }
+tr.ok td.util { color: var(--ok); font-weight: 650; }
+tr.miss td.util { color: var(--warn); }
+tr.fail td.util { color: var(--err); font-weight: 650; }
+code { font: 12px var(--mono); background: var(--bg-deep); color: var(--ink); padding: .1rem .4rem; border-radius: 6px; }
+.foot { margin-top: 26px; display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+.foot span + span::before { content: "·"; margin-right: 8px; color: var(--line-strong); }
+
+@media (max-width: 860px) {
+  .grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.quota { grid-template-columns: 1fr 1fr; }
+  .grid.quota > :last-child { grid-column: 1 / -1; }
+  .times { grid-template-columns: 1fr 1fr; }
 }
-.stop-form .hint { color: var(--muted); font-size: 12px; }
-.stop-form a.guard {
-  text-decoration: none; border-radius: 8px; padding: 6px 10px; font-size: 12px; font-weight: 650;
-  border: 1px solid var(--line);
+@media (max-width: 600px) {
+  main { padding: 26px 16px 40px; }
+  h1 { font-size: 25px; }
+  .grid.four, .grid.quota { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .stat { padding: 13px 14px; }
+  .session { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "sw body" "act act"; padding: 14px; }
+  .session > .actions { flex-direction: row; justify-content: flex-end; }
+  .times { grid-template-columns: 1fr; }
+  .rename .btn { opacity: 1; pointer-events: auto; }
 }
-.stop-form a.guard.on { color: var(--ok); background: var(--ok-bg); }
-.stop-form a.guard.off { color: var(--muted); background: var(--empty-bg); }
-.rename { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 4px; }
-.rename input {
-  flex: 1; min-width: 10rem; max-width: 22rem;
-  background: #11141a; color: var(--text);
-  border: 1px solid var(--line); border-radius: 8px;
-  padding: 6px 8px; font: inherit; font-weight: 650; font-size: 15px;
-}
-.rename input:focus { outline: none; border-color: color-mix(in srgb, var(--armed) 55%, var(--line)); }
-.rename button {
-  color: var(--armed); background: var(--armed-bg);
-  border: 1px solid var(--line); border-radius: 8px;
-  padding: 6px 10px; font: inherit; font-size: 12px; cursor: pointer;
-}
-.meta { color: var(--muted); font-size: 13px; }
-.meta span { white-space: nowrap; }
-.times { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 10px 16px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
-.forget {
-  color: var(--muted); font-size: 12px; text-decoration: none;
-  padding: 6px 8px; border-radius: 8px; border: 1px solid transparent;
-}
-.forget:hover { color: var(--err); border-color: var(--line); }
-.actions { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
-.ping {
-  color: var(--armed); font-size: 12px; text-decoration: none;
-  padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line);
-  background: var(--armed-bg);
-}
-.ping:hover { border-color: color-mix(in srgb, var(--armed) 55%, var(--line)); }
-.ping[aria-busy="true"] { opacity: .65; pointer-events: none; }
-.error {
-  margin-top: 14px;
-  padding: 12px 14px;
-  border-radius: 12px;
-  color: var(--err); background: var(--err-bg); white-space: pre-wrap;
-}
-.warn {
-  margin-top: 14px;
-  padding: 12px 14px;
-  border-radius: 12px;
-  color: var(--warn); background: rgba(245,193,74,.12);
-}
-.row-err { margin-top: 8px; color: var(--err); font-size: 12px; }
-.hint {
-  margin-top: 16px;
-  color: var(--muted);
-  font-size: 13px;
-}
-.quota {
-  margin: 18px 0 8px;
-  background: linear-gradient(180deg, var(--panel), var(--panel-2));
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 14px 14px 8px;
-}
-.quota h2 { margin: 0 0 4px; font-size: 15px; font-weight: 650; }
-.quota .sub { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
-.quota-table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
-.quota-table th {
-  text-align: left; color: var(--muted); font-weight: 500;
-  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
-  padding: 6px 8px; border-bottom: 1px solid var(--line);
-}
-.quota-table td { padding: 8px; border-bottom: 1px solid rgba(42,49,64,.65); vertical-align: top; }
-.quota-table tr:last-child td { border-bottom: 0; }
-.quota-table .raw { color: var(--muted); font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
-.quota-table tr.ok td.util { color: var(--ok); font-weight: 650; }
-.quota-table tr.miss td.util { color: var(--warn); }
-.quota-table tr.fail td.util { color: var(--err); font-weight: 650; }
-.scroll { overflow-x: auto; }
-.foot { margin-top: 18px; color: var(--muted); font-size: 12px; }
-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; background: #11141a; padding: .12rem .35rem; border-radius: 6px; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
 <body>
 <main id="view">
-  <div class="top">
+  <header class="top">
     <div>
+      <div class="eyebrow"><span class="mark" aria-hidden="true"></span>CLIProxyAPI 插件 · v{{.Version}}</div>
       <h1>Claude 缓存保活</h1>
       <p class="lead">{{.StateHint}}</p>
     </div>
     <div class="badge state-{{.State}}"><span class="dot"></span>{{.StateLabel}}</div>
-  </div>
-  <div class="stats">
-    <div class="stat"><div class="k">会话</div><div class="v">{{.SessionCount}} / {{.MaxSessions}}<small>{{.EnabledCount}} 路保活中</small></div></div>
-    <div class="stat"><div class="k">间隔</div><div class="v">{{.IntervalMin}} 分钟<small>输出上限 {{.MaxTokens}}</small></div></div>
-    <div class="stat"><div class="k">上次保活</div><div class="v">{{.LastPing}}<small>{{.LastPingAgo}}</small></div></div>
-    <div class="stat"><div class="k">最近一次到期</div><div class="v">{{.NextPing}}<small>{{.NextPingAgo}}</small></div></div>
-  </div>
-  <div class="stats budget">
-    <div class="stat"><div class="k">5 小时已用</div><div class="v">{{.BudgetUsed}}<small>CPA 对话停在 {{.BudgetBlock}}{{if .HasReset}} · 刷新 {{.ResetAt}}（{{.ResetIn}}）{{else if .UsedKnown}} · 还没读到刷新时间{{end}}</small></div></div>
-    <div class="stat"><div class="k">7 天已用</div><div class="v">{{.BudgetUsed7d}}<small>{{if .HasReset7d}}刷新 {{.Reset7dAt}}（{{.Reset7dIn}}）{{else if .Used7dKnown}}还没读到刷新时间{{else}}等下一发带上 7 天用量头{{end}}</small></div></div>
-    <div class="stat"><div class="k">CPA 对话 / 保活</div><div class="v">{{.BudgetChat}} / {{.BudgetKeep}}<small>{{.BudgetNote}}</small></div></div>
-  </div>
-  <form class="stop-form" data-stop action="" method="get">
-    <span class="k">对话停在</span>
-    <input name="stop" type="number" min="60" max="99" step="1" value="{{.StopPercent}}" aria-label="对话停在百分之几">
-    <span>%</span>
-    <button type="submit">保存</button>
-    <a class="guard {{if .GuardChat}}on{{else}}off{{end}}" data-action href="{{.GuardHref}}">{{if .GuardChat}}正在拦对话{{else}}未拦对话{{end}}</a>
-    <span class="hint">默认 95，用量真到这条线才拦，不按下一发估。点右侧开关可关掉拦截。改完会记住，重启 CPA 也还在。</span>
+  </header>
+
+  <section class="grid four">
+    <div class="card stat"><div class="k">会话</div><div class="v">{{.SessionCount}}<span class="unit">/ {{.MaxSessions}}</span></div><div class="s">{{.EnabledCount}} 路保活中{{if .BackgroundCnt}} · {{.BackgroundCnt}} 路后台会话{{end}}</div></div>
+    <div class="card stat"><div class="k">间隔</div><div class="v">{{.IntervalMin}}<span class="unit">分钟</span></div><div class="s">输出上限 max_tokens={{.MaxTokens}}</div></div>
+    <div class="card stat"><div class="k">上次保活</div><div class="v sm">{{.LastPing}}</div><div class="s">{{.LastPingAgo}}</div></div>
+    <div class="card stat"><div class="k">最近一次到期</div><div class="v sm">{{.NextPing}}</div><div class="s">{{.NextPingAgo}}</div></div>
+  </section>
+
+  <section class="grid quota">
+    <div class="card stat">
+      <div class="k">5 小时已用</div>
+      <div class="v">{{.BudgetUsed}}</div>
+      <div class="bar tone-{{.Tone5h}}"><span class="fill" style="width: {{.Bar5h}}%"></span>{{if .GuardChat}}<span class="stopline" style="left: {{.StopPercent}}%" title="对话停线 {{.StopPercent}}%"></span>{{end}}</div>
+      <div class="s">CPA 对话停在 {{.BudgetBlock}}{{if .HasReset}} · 刷新 {{.ResetAt}}（{{.ResetIn}}）{{else if .UsedKnown}} · 还没读到刷新时间{{end}}</div>
+    </div>
+    <div class="card stat">
+      <div class="k">7 天已用</div>
+      <div class="v">{{.BudgetUsed7d}}</div>
+      <div class="bar tone-{{.Tone7d}}"><span class="fill" style="width: {{.Bar7d}}%"></span></div>
+      <div class="s">{{if .HasReset7d}}刷新 {{.Reset7dAt}}（{{.Reset7dIn}}）{{else if .Used7dKnown}}还没读到刷新时间{{else}}等下一发带上 7 天用量头{{end}}</div>
+    </div>
+    <div class="card stat">
+      <div class="k">CPA 对话 / 保活</div>
+      <div class="v">{{.BudgetChat}}<span class="unit">/ {{.BudgetKeep}}</span></div>
+      <div class="s">{{.BudgetNote}}</div>
+    </div>
+  </section>
+
+  <form class="card controls" data-stop action="" method="get">
+    <div class="ctl">
+      <label class="k" for="stop-input">对话停在</label>
+      <span class="field"><input id="stop-input" name="stop" type="number" min="60" max="99" step="1" value="{{.StopPercent}}" aria-label="对话停在百分之几"><span>%</span></span>
+      <button class="btn" type="submit">保存</button>
+    </div>
+    <a class="toggle" data-action href="{{.GuardHref}}" role="switch" aria-checked="{{if .GuardChat}}true{{else}}false{{end}}"><span class="switch {{if .GuardChat}}on{{end}}"></span>{{if .GuardChat}}正在拦对话{{else}}未拦对话{{end}}</a>
+    <p class="hint">默认 95，用量真到这条线才拦，不按下一发估。改完会记住，重启 CPA 也还在。</p>
   </form>
+
   {{if .ChatBlocked}}
-  <div class="warn">CPA 对话已停在停线。等到 5 小时额度刷新{{if .HasReset}}（{{.ResetAt}}，{{.ResetIn}}）{{end}}或用量掉回停线。/compact 仍可走。保活不受停线影响。</div>
+  <div class="alert warn">CPA 对话已停在停线。等到 5 小时额度刷新{{if .HasReset}}（{{.ResetAt}}，{{.ResetIn}}）{{end}}或用量掉回停线。/compact 仍可走。保活不受停线影响。</div>
   {{end}}
   {{if and .KeepPaused (not .ChatBlocked)}}
-  <div class="warn">{{.BudgetNote}}</div>
+  <div class="alert warn">{{.BudgetNote}}</div>
   {{end}}
-  {{if not .HasSessions}}
-  <div class="empty">把 Claude Code 指到 CPA 的 <code>127.0.0.1:8317</code>，并设置 <code>promptCacheTtl: "1h"</code>。正常完成一轮对话后刷新本页。插件会跳过 <code>count_tokens</code>。</div>
-  {{else}}
-  <div class="list">
-    {{range .Sessions}}
-    <article class="session {{.RowClass}}">
-      <a class="cb {{if .Enabled}}on{{end}}" data-action href="{{.ToggleHref}}" title="{{if .Enabled}}取消保活{{else}}开启保活{{end}}"><span class="mark">{{if .Enabled}}✓{{else}}○{{end}}</span></a>
-      <div>
-        <form class="rename" data-rename action="" method="get">
-          <input type="hidden" name="rename" value="{{.ID}}">
-          <input name="name" value="{{.Label}}" maxlength="42" aria-label="会话名称" spellcheck="false">
-          <button type="submit">改名</button>
-        </form>
-        <div class="meta">{{.Model}} · TTL {{.CacheTTL}} · {{.Messages}} 条消息 · {{.BodySize}}</div>
-        <div class="times">
-          <span>最近请求 {{.SavedAt}} {{.SavedAgo}}</span>
-          <span>下次保活 {{.NextPing}} {{.NextPingAgo}}</span>
-          <span>上次保活 {{.LastPing}} {{.LastPingAgo}}{{if ne .PingCache "—"}} · {{.PingCache}}{{end}}</span>
+
+  <section>
+    <div class="section-head">
+      <h2>会话</h2><span class="count">{{.SessionCount}}</span>
+      <span class="note">标题取自 Claude Code 为会话生成的名称，和 /resume 里看到的一致</span>
+    </div>
+    {{if not .HasSessions}}
+    <div class="empty"><span class="big">还没有记下对话</span>把 Claude Code 指到 CPA 的 <code>127.0.0.1:8317</code>，并设置 <code>promptCacheTtl: "1h"</code>。正常完成一轮对话后刷新本页。插件会跳过 <code>count_tokens</code>。</div>
+    {{else}}
+    <div class="list">
+      {{range .Sessions}}
+      <article class="card session {{.RowClass}}">
+        <a class="switch {{if .Enabled}}on{{end}}" data-action href="{{.ToggleHref}}" role="switch" aria-checked="{{if .Enabled}}true{{else}}false{{end}}" title="{{if .Enabled}}取消保活{{else}}开启保活{{end}}"></a>
+        <div class="body">
+          <form class="rename" data-rename action="" method="get">
+            <input type="hidden" name="rename" value="{{.ID}}">
+            <input class="name" name="name" value="{{.Label}}" maxlength="42" aria-label="会话名称" spellcheck="false" title="{{.Label}}">
+            <button class="btn" type="submit">改名</button>
+          </form>
+          <div class="tags">
+            <span class="tag src-{{.TitleSource}}">{{.TitleTag}}</span>
+            {{if .Background}}<span class="tag bg">后台会话</span>{{end}}
+            <span class="tag">{{.Model}}</span>
+            <span class="tag">TTL {{.CacheTTL}}</span>
+            <span class="tag">{{.Messages}} 条消息</span>
+            <span class="tag">{{.BodySize}}</span>
+          </div>
+          <dl class="times">
+            <div><dt>最近请求</dt><dd>{{.SavedAt}} <em>{{.SavedAgo}}</em></dd></div>
+            <div><dt>下次保活</dt><dd>{{.NextPing}} <em>{{.NextPingAgo}}</em></dd></div>
+            <div><dt>上次保活</dt><dd>{{.LastPing}} <em>{{.LastPingAgo}}</em>{{if ne .PingCache "—"}} <span class="cache">{{.PingCache}}</span>{{end}}</dd></div>
+          </dl>
+          {{if .PingPaused}}<div class="row-err">连续两次保活未命中，已暂停后续心跳，避免把冷前缀反复按 1h 写入。新对话后会重新开。</div>{{end}}
+          {{if .PingError}}<div class="row-err">{{.PingError}}</div>{{end}}
         </div>
-        {{if .PingPaused}}<div class="row-err">连续两次保活未命中，已暂停后续心跳，避免把冷前缀反复按 1h 写入。新对话后会重新开。</div>{{end}}
-        {{if .PingError}}<div class="row-err">{{.PingError}}</div>{{end}}
-      </div>
-      <div class="actions">
-        <a class="ping" data-action data-ping href="{{.PingHref}}">立刻保活</a>
-        <a class="forget" data-action href="{{.ForgetHref}}">忘记</a>
-      </div>
-    </article>
+        <div class="actions">
+          <a class="btn primary" data-action data-ping href="{{.PingHref}}">立刻保活</a>
+          <a class="btn quiet danger" data-action href="{{.ForgetHref}}">忘记</a>
+        </div>
+      </article>
+      {{end}}
+    </div>
+    <ul class="hints">
+      <li>新对话默认不保活，打开左侧开关才定时续。满员（比如 8 路）时优先顶掉没开保活的。</li>
+      <li>「立刻保活」只打这一路，不等倒计时。</li>
+      <li>名称可以自己改；清空再保存会回到 Claude Code 生成的标题，还没拿到标题时用首条消息。</li>
+      <li>后台会话（<code>claude --bg</code> 或 agents 视图里的后台会话）照常列出并可保活；Task/Agent 子代理不保活。</li>
+      <li>CPA 对话会在上面填的百分比停住，留下一截给保活，也避免最后一发打穿 100%。</li>
+      {{if .SubagentNote}}<li>{{.SubagentNote}}</li>{{end}}
+    </ul>
     {{end}}
-  </div>
-  <p class="hint">新对话默认不保活，点左侧方块才定时续。满员（比如 8 路）时优先顶掉没开保活的。「立刻保活」只打这一路，不等倒计时。会话名称可以自己改，留空再保存会回到首条消息。CPA 对话会在上面填的百分比停住，留下一截给保活，也避免最后一发打穿 100%。Claude Code 的 Task/Agent 子代理会单独成一路请求，插件认出来后不保活。</p>
-  {{if .SubagentNote}}
-  <p class="hint">{{.SubagentNote}}</p>
-  {{end}}
-  {{end}}
+    {{if and .SubagentNote (not .HasSessions)}}
+    <ul class="hints"><li>{{.SubagentNote}}</li></ul>
+    {{end}}
+  </section>
+
   {{if .PingError}}
-  <div class="error">上一轮保活错误：{{.PingError}}</div>
+  <div class="alert err">上一轮保活错误：{{.PingError}}</div>
   {{end}}
-  {{if and .SubagentNote (not .HasSessions)}}
-  <p class="hint">{{.SubagentNote}}</p>
-  {{end}}
-  <section class="quota">
+
+  <section class="card log">
     <h2>额度记录</h2>
     <p class="sub">每次 Claude 响应回来后解析的用量。缓存列看 <code>cache_read</code> / <code>cache_creation</code>；5 小时列是额度头。最新在上，最多 5 条；CPA 重启后清空。</p>
     {{if .HasQuotaLog}}
     <div class="scroll">
-      <table class="quota-table">
+      <table>
         <thead>
           <tr><th>时间</th><th>来源</th><th>缓存</th><th>5 小时</th><th>状态</th><th>7 天</th><th>原始头</th></tr>
         </thead>
         <tbody>
           {{range .QuotaLog}}
           <tr class="{{.RowClass}}">
-            <td>{{.At}}<div class="raw">{{.Ago}} · {{.Kind}} · {{.Model}}</div></td>
-            <td>{{.Kind}}</td>
+            <td>{{.At}}<div class="raw">{{.Ago}} · {{.Model}}</div></td>
+            <td><span class="kind">{{.Kind}}</span></td>
             <td>{{.Cache}}</td>
             <td class="util">{{.Util5h}}</td>
             <td>{{.Status5h}}</td>
@@ -725,7 +867,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fo
     <p class="sub">还没有用量回调。用 Claude Code 走 CPA 正常聊一轮后，这里应出现缓存命中情况和 5h-utilization。如果缓存是「—」，说明这次回调没带 token 明细。</p>
     {{end}}
   </section>
-  <p class="foot">数据每 15 秒静默更新 · {{.Now}} · {{.Version}} · 不会显示 prompt 正文</p>
+
+  <p class="foot"><span>数据每 15 秒静默更新</span><span>{{.Now}}</span><span>{{.Version}}</span><span>不会显示 prompt 正文</span></p>
 </main>
 <script>
 (function () {

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 func claudeBody(firstUser, system string) []byte {
@@ -286,7 +286,7 @@ func TestHandleStatusPingRedirects(t *testing.T) {
 	setSessionEnabled(id, false)
 	mu.Lock()
 	sessions[id].PingExpensive = true
-		sessions[id].PingMissStreak = 2
+	sessions[id].PingMissStreak = 2
 	mu.Unlock()
 
 	var gotID string
@@ -409,10 +409,22 @@ func TestSubagentKindFromParentAgentHeader(t *testing.T) {
 	}
 }
 
-func TestSubagentKindFromBackgroundAppHeader(t *testing.T) {
+func TestBackgroundSessionIsKeptAndTagged(t *testing.T) {
+	resetSessionsForTest()
+	t.Cleanup(resetSessionsForTest)
 	h := http.Header{"X-App": []string{"cli-bg"}}
-	if subagentKind(h, claudeBody("后台任务", "sys")) != "background" {
-		t.Fatal("x-app=cli-bg should mark a background agent")
+	if subagentKind(h, claudeBody("后台任务", "sys")) != "" {
+		t.Fatal("x-app=cli-bg is a background session, not a subagent")
+	}
+	upsertSession("claude-opus-5", "claude", "claude", h, claudeBody("后台任务", "sys"))
+	got := listSessions()
+	if len(got) != 1 || !got[0].Background {
+		t.Fatalf("background session should be listed and tagged: %+v", got)
+	}
+	sub := "x-anthropic-billing-header: cc_version=2.1.312.fc8; cc_entrypoint=cli; cc_is_subagent=true;"
+	upsertSession("claude-opus-5", "claude", "claude", h, claudeBody("后台里的子代理", sub))
+	if len(listSessions()) != 1 {
+		t.Fatal("a background session's subagent must still be skipped")
 	}
 }
 

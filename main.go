@@ -64,13 +64,13 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 const (
 	pluginID      = "claude-cache-keepalive"
-	pluginVersion = "0.8.12"
+	pluginVersion = "0.9.1"
 )
 
 type envelope struct {
@@ -95,9 +95,10 @@ type registration struct {
 }
 
 type registrationCapabilities struct {
-	RequestInterceptor bool `json:"request_interceptor"`
-	ManagementAPI      bool `json:"management_api"`
-	UsagePlugin        bool `json:"usage_plugin"`
+	RequestInterceptor        bool `json:"request_interceptor"`
+	ResponseStreamInterceptor bool `json:"response_stream_interceptor"`
+	ManagementAPI             bool `json:"management_api"`
+	UsagePlugin               bool `json:"usage_plugin"`
 }
 
 type statusPage struct {
@@ -205,6 +206,8 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 	case pluginabi.MethodRequestInterceptAfter:
 		saveSnapshot(request)
 		return okEnvelope(pluginapi.RequestInterceptResponse{})
+	case pluginabi.MethodResponseInterceptStreamChunk:
+		return handleStreamChunk(request), nil
 	case pluginabi.MethodUsageHandle:
 		handleUsage(request)
 		return okEnvelope(map[string]any{})
@@ -245,9 +248,10 @@ func pluginRegistration() registration {
 			},
 		},
 		Capabilities: registrationCapabilities{
-			RequestInterceptor: true,
-			ManagementAPI:      true,
-			UsagePlugin:        true,
+			RequestInterceptor:        true,
+			ResponseStreamInterceptor: true,
+			ManagementAPI:             true,
+			UsagePlugin:               true,
 		},
 	}
 }
@@ -270,6 +274,7 @@ func applyConfig(request []byte) {
 	mu.Lock()
 	cfg = next
 	mu.Unlock()
+	loadPersistedTitles()
 }
 
 func saveSnapshot(raw []byte) {

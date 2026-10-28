@@ -6,7 +6,7 @@ A [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) plugin that rememb
 
 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 插件：记住走 CPA 的 Claude 对话，每隔 50 分钟把已勾选会话原样重发，并把 `max_tokens` 卡成 1，用来刷新 Anthropic prompt cache 的 1 小时 TTL。
 
-Current version **0.8.12**. / 当前版本 **0.8.12**。
+Current version **0.9.1**. / 当前版本 **0.9.1**。
 
 [![LINUX DO](https://img.shields.io/badge/LINUX%20DO-community-ff6b35)](https://linux.do)
 
@@ -28,6 +28,8 @@ A successful keepalive is a real Messages completion that **reads** the cached p
 - New chats default to keepalive off. Check a session on the status page to keep it. From the last real chat request, each checked session is POSTed back to local `/v1/messages` every 50 minutes (`max_tokens=1`, `stream=false`). Thinking / effort are left as-is so the cache key does not change
 - Status page: toggle, rename, forget, **Ping now** (replays that session immediately, even if the timer is still running), the 5-hour stop percent, and 5h / 7d utilization from upstream headers
 - Claude Code Task / Agent subagents are not kept alive (`X-Claude-Code-Agent-Id`, `cc_is_subagent=true` in system)
+- Background sessions (`claude --bg`, sent as `X-App: cli-bg`) are listed like any other chat, tagged 后台会话
+- Session names are the title Claude Code generates for `/resume`: the plugin watches the streamed reply of Claude Code's session-naming request and matches it by the session id in `metadata.user_id`. Until it arrives the first user message is shown; a custom name always wins. Titles are kept in `claude-cache-keepalive.titles.json` next to the settings file. The naming and web-search side requests are not listed as chats
 - After a 5-hour stop, **chat stays blocked** until utilization **actually** reaches the stop line (default 95%). A cache-miss rewrite is not used to predict the next turn. `/compact` still goes through. Status page can turn this local block off. If chat and keepalive are both paused and no Reset time is known, one probe chat is allowed so the window cannot deadlock
 
 Unchecked sessions still update their snapshot on new messages. Checked sessions are not evicted for idle. Unchecked ones older than `idle_evict_minutes` (default 180) are dropped; over the cap, unchecked chats are replaced first, then the least-recent.
@@ -36,7 +38,7 @@ Restarting CPA clears in-memory sessions and the 5-hour usage window. The stop p
 
 ### Build
 
-Needs Go **1.26+** (CLIProxyAPI v7 SDK) and CGO (Linux: `gcc`; macOS: Xcode CLI tools). Must be **`-buildmode=c-shared`**, not `-buildmode=plugin`.
+Needs Go **1.26.10+** (CLIProxyAPI v8 SDK) and CGO (Linux: `gcc`; macOS: Xcode CLI tools). Must be **`-buildmode=c-shared`**, not `-buildmode=plugin`.
 
 ```bash
 make test
@@ -45,10 +47,10 @@ make build
 
 Output: `dist/<goos>/<goarch>/claude-cache-keepalive.so` (`.dylib` on macOS).
 
-On a host without a local Go 1.26 toolchain, Docker works:
+On a host without a local Go toolchain, Docker works. Use a `-bookworm` image when CPA runs in the Debian 12 container, so the `.so` does not need a newer glibc:
 
 ```bash
-docker run --rm -e CGO_ENABLED=1 -v "$PWD":/src -w /src golang:1.26 \
+docker run --rm -e CGO_ENABLED=1 -v "$PWD":/src -w /src golang:1.27-bookworm \
   bash -c 'go test ./... && go build -buildvcs=false -buildmode=c-shared -o dist/linux/amd64/claude-cache-keepalive.so .'
 ```
 
@@ -167,6 +169,8 @@ If upstream TTL is still 5 minutes, a 50-minute ping is too late. Set `promptCac
 - 新对话默认不保活，状态页勾上才会续；从最后一次对话请求起算，每 50 分钟把上次请求 POST 回本机 `/v1/messages` 一次（`max_tokens=1`，`stream=false`）。thinking / effort 原样带着，避免把缓存键改掉
 - 状态页可勾选、取消、改名、忘记某一路，也可点「立刻保活」马上重放这一路；还可改 5 小时额度的停线；顶栏显示 5 小时和 7 天已用
 - Claude Code 的 Task / Agent 子代理不进保活名单（带 `X-Claude-Code-Agent-Id`，system 里有 `cc_is_subagent=true`）
+- 后台会话（`claude --bg`，请求头 `X-App: cli-bg`）照常列出，带「后台会话」标记
+- 会话名称用 Claude Code 给 `/resume` 生成的标题：插件旁听 Claude Code 的会话命名请求的流式回复，按 `metadata.user_id` 里的 session id 对上会话。标题到之前先显示首条消息；手动改的名字优先。标题存在设置文件旁边的 `claude-cache-keepalive.titles.json`。命名和联网搜索这类旁路请求不会列成对话
 - 5 小时用量**真到**停线（默认 95%）后才拦对话，不用 cache miss 去估下一发。`/compact` 仍放行。状态页可关掉这道本地拦截。对话和保活都停、又还没读到刷新时间时，会放行一发探测，避免卡死
 
 取消勾选后仍会跟着新消息更新快照。已勾选的不会因为空闲被踢掉。未勾选的超过 `idle_evict_minutes`（默认 180）会被丢掉；超过上限时优先顶掉未勾选的，再才动最久没说话的。
@@ -175,7 +179,7 @@ If upstream TTL is still 5 minutes, a 50-minute ping is too late. Set `promptCac
 
 ### 编译
 
-需要 Go **1.26+**（CLIProxyAPI v7 SDK）和 CGO（Linux 装 `gcc`，macOS 有 Xcode CLI tools）。必须用 **`-buildmode=c-shared`**，不要用 `-buildmode=plugin`。
+需要 Go **1.26.10+**（CLIProxyAPI v8 SDK）和 CGO（Linux 装 `gcc`，macOS 有 Xcode CLI tools）。必须用 **`-buildmode=c-shared`**，不要用 `-buildmode=plugin`。
 
 ```bash
 make test
@@ -184,10 +188,10 @@ make build
 
 产物在 `dist/<goos>/<goarch>/claude-cache-keepalive.so`（macOS 是 `.dylib`）。
 
-机器上没有 Go 1.26 时可以用 Docker：
+机器上没有 Go 时可以用 Docker。CPA 跑在 Debian 12 容器里时用 `-bookworm` 镜像，免得 `.so` 依赖更新的 glibc：
 
 ```bash
-docker run --rm -e CGO_ENABLED=1 -v "$PWD":/src -w /src golang:1.26 \
+docker run --rm -e CGO_ENABLED=1 -v "$PWD":/src -w /src golang:1.27-bookworm \
   bash -c 'go test ./... && go build -buildvcs=false -buildmode=c-shared -o dist/linux/amd64/claude-cache-keepalive.so .'
 ```
 

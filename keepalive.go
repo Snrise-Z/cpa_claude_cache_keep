@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -141,15 +142,13 @@ func isKeepaliveCandidate(body []byte) bool {
 
 // subagentKind reports whether this Claude request is a Claude Code Task/Agent
 // child. Confirmed against CPA request dumps on the live gateway:
-// parent-agent-id, x-app=cli-bg, and task_budget were absent; subagent turns
-// always had X-Claude-Code-Agent-Id and system text `cc_is_subagent=true`.
-// Main turns shared the same X-Claude-Code-Session-Id and x-app=cli.
+// parent-agent-id and task_budget were absent; subagent turns always had
+// X-Claude-Code-Agent-Id and system text `cc_is_subagent=true`. Main turns
+// shared the same X-Claude-Code-Session-Id and x-app=cli. x-app=cli-bg is a
+// background session (CLAUDE_CODE_SESSION_KIND=bg): a real conversation, kept.
 func subagentKind(headers http.Header, body []byte) string {
 	if headerGetCI(headers, "X-Claude-Code-Parent-Agent-Id") != "" {
 		return "subagent"
-	}
-	if strings.EqualFold(headerGetCI(headers, "X-App"), "cli-bg") {
-		return "background"
 	}
 	if headerGetCI(headers, "X-Claude-Code-Agent-Id") != "" {
 		return "subagent"
@@ -275,8 +274,16 @@ func isCompactRequest(headers http.Header, body []byte) bool {
 	return strings.Contains(beta, "compact-2026")
 }
 
+// harnessBlocks are wrappers Claude Code puts into the first user message
+// (reminders, slash-command echoes). They are not what the user typed.
+var harnessBlocks = regexp.MustCompile(`(?s)<(system-reminder|local-command-caveat|local-command-stdout|local-command-stderr|command-name|command-message|command-args)>.*?</(?:system-reminder|local-command-caveat|local-command-stdout|local-command-stderr|command-name|command-message|command-args)>`)
+
 func sessionLabel(body []byte) string {
-	text := strings.Join(strings.Fields(firstUserText(body)), " ")
+	first := firstUserText(body)
+	text := strings.Join(strings.Fields(harnessBlocks.ReplaceAllString(first, " ")), " ")
+	if text == "" {
+		text = strings.Join(strings.Fields(first), " ")
+	}
 	if text == "" {
 		return "未命名对话"
 	}

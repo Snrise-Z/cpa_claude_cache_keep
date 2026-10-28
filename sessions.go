@@ -11,6 +11,9 @@ type session struct {
 	ID                 string
 	Label              string
 	CustomLabel        bool
+	AITitle            bool
+	CCSessionID        string
+	Background         bool
 	Enabled            bool
 	Model              string
 	SourceFormat       string
@@ -34,12 +37,17 @@ func upsertSession(model, sourceFormat, toFormat string, headers http.Header, bo
 	if !isKeepaliveCandidate(body) {
 		return
 	}
+	if auxiliaryKind(body) != "" {
+		return
+	}
 	kind := subagentKind(headers, body)
 	now := time.Now()
 	info := inspectBody(body)
 	label := sessionLabel(body)
 	compact := looksLikeCompact(firstUserText(body))
 	sid := claudeSessionID(headers, body)
+	ccsid := ccSessionID(headers, body)
+	background := isBackgroundSession(headers)
 	contentID := contentSessionKey(model, body)
 	mu.Lock()
 	defer mu.Unlock()
@@ -51,10 +59,21 @@ func upsertSession(model, sourceFormat, toFormat string, headers http.Header, bo
 		return
 	}
 	id := resolveSessionIDLocked(sid, contentID)
+	title := titleForLocked(ccsid)
 	if existing, ok := sessions[id]; ok {
-		if !existing.CustomLabel && !(compact && strings.TrimSpace(existing.Label) != "") {
+		switch {
+		case existing.CustomLabel:
+		case title != "":
+			existing.Label = title
+			existing.AITitle = true
+		case !(compact && strings.TrimSpace(existing.Label) != ""):
 			existing.Label = label
+			existing.AITitle = false
 		}
+		if ccsid != "" {
+			existing.CCSessionID = ccsid
+		}
+		existing.Background = background
 		existing.Model = model
 		existing.SourceFormat = sourceFormat
 		existing.ToFormat = toFormat
@@ -71,9 +90,15 @@ func upsertSession(model, sourceFormat, toFormat string, headers http.Header, bo
 		sessions = map[string]*session{}
 	}
 	evictSessionsLocked(now, cfg.MaxSessions-1)
+	if title != "" {
+		label = title
+	}
 	sessions[id] = &session{
 		ID:           id,
 		Label:        label,
+		AITitle:      title != "",
+		CCSessionID:  ccsid,
+		Background:   background,
 		Enabled:      false,
 		Model:        model,
 		SourceFormat: sourceFormat,
@@ -165,9 +190,15 @@ func renameSession(id, name string) bool {
 	if name == "" {
 		item.CustomLabel = false
 		item.Label = sessionLabel(item.Body)
+		item.AITitle = false
+		if title := titleForLocked(item.CCSessionID); title != "" {
+			item.Label = title
+			item.AITitle = true
+		}
 		return true
 	}
 	item.CustomLabel = true
+	item.AITitle = false
 	item.Label = name
 	return true
 }
@@ -341,6 +372,9 @@ func resetSessionsForTest() {
 	lastSubagentAt = time.Time{}
 	lastSubagentKind = ""
 	lastSubagentLabel = ""
+	titles = map[string]titleEntry{}
+	titleStreams = map[string]*titleStream{}
+	titlesLoaded = false
 	cfg = defaultConfig()
 	settingsPath = ""
 	persistSettings = false
